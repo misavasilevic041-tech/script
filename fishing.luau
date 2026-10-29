@@ -10,6 +10,7 @@
 --   AF.policy    "smart"|"always"|"probe"       fight policy
 --   AF.hardCast  true/false                     cast at exactly 34.0 m (MAX DEPTH)
 --   AF.sell / sellKeep / sellEvery / sellMax    auto-sell
+--   AF.autoRod / autoBait / baitMaxPrice       v3: auto rod pick, bait pick + auto-buy (see runMaint)
 --   AF.stop()    unload: stop everything, destroy the menu, clear getgenv() entries
 --
 -- v1 (hub): runs under the hub. STATE comes from Core.launch, the log goes to Core.log (copy-log button),
@@ -50,6 +51,9 @@ Core.addStrings({
 		af_toast_on = "Рыбалка включена",
 		af_toast_off = "Рыбалка выключена",
 		af_toast_unload = "Рыбалка выгружена",
+		af_autorod = "автовыбор удочки",
+		af_autobait = "приманка",
+		af_baitcap = "макс. цена приманки",
 	},
 	en = {
 		af_enabled = "ENABLED",
@@ -72,6 +76,9 @@ Core.addStrings({
 		af_toast_on = "Fishing enabled",
 		af_toast_off = "Fishing disabled",
 		af_toast_unload = "Fishing unloaded",
+		af_autorod = "auto rod",
+		af_autobait = "bait",
+		af_baitcap = "max bait price",
 	},
 })
 
@@ -129,6 +136,9 @@ local DEFAULTS = {
 	human = "normal",
 	mouse = false,
 	pauses = true,
+	autoRod = true,
+	autoBait = "auto", -- "off" | "auto" | a bait id (Dough, Worm, Shrimp, Shimmer, DeepSea, Ancient)
+	baitMaxPrice = 6, -- per piece; "auto" never picks or buys a more expensive bait
 }
 for k, v in pairs(Core.getFarm("fishing", DEFAULTS)) do
 	if AF[k] == nil then
@@ -329,6 +339,9 @@ local chargeAt = 0.97
 local selling, sellPending = false, false
 local lastBind, lastAttach, lastEquip, lastRodScan = 0, 0, 0, 0
 local rodTool -- the rod Tool (in the character or the backpack), nil when the player has none
+local baitData, baitAt = nil, 0 -- last BaitState payload from the server and when it arrived
+local maint, maintPending = false, true -- rod / bait upkeep (runMaint)
+local lastRodSent, lastRodPick, noBuyUntil = nil, 0, {}
 
 local function setReel(v)
 	if reeling ~= v then
@@ -416,6 +429,7 @@ local function detach(reason)
 	lastState, lastPopupName = nil, nil
 	catchSince, okSince, okStage, pendingCast = 0, 0, 0, 0
 	sellPending = false
+	maintPending = true -- the rod was recreated: re-check rod and bait
 	due, reelDue = {}, nil
 end
 
@@ -440,6 +454,9 @@ local function onEvent(a1, a2)
 		return
 	end
 	local ev, d = a2.event, a2.data or {}
+	if ev == "BaitState" then
+		baitData, baitAt = d, os.clock()
+	end
 	if ev == "FightUpdate" then
 		fight = d
 		maxProg = math.max(maxProg, d.progress or 0)
@@ -455,6 +472,7 @@ local function onEvent(a1, a2)
 		s.catches = s.catches + 1
 		s.bestProg = math.max(s.bestProg, maxProg)
 		log("CATCH prog=%.3f", maxProg)
+		maintPending = true -- bait is spent per catch: re-check after every fish
 		sinceSell = sinceSell + 1
 		if AF.sell and sinceSell >= AF.sellEvery then
 			sellPending = true
@@ -724,6 +742,124 @@ local function dismissOk(now, st)
 end
 
 -- settings are read live everywhere; this only drops timers scheduled with the old tempo / randomness
+-- ============================================================
+-- v3: auto rod + bait (protocol taken from the logs: SelectRod / SelectBait / BuyBait / GetBaitState)
+-- ============================================================
+local ROD_LEVELS = { { "Legend", 25 }, { "Ocean", 12 }, { "River", 5 }, { "Starter", 1 } } -- best first
+local BAIT_LOW = 2 -- buy a new pack when the stock drops to this or below
+
+local function bestRod(level)
+	for _, r in ipairs(ROD_LEVELS) do
+		if level >= r[2] then
+			return r[1]
+		end
+	end
+	return "Starter"
+end
+
+local function currentRodId()
+	for _, o in ipairs({ P, P.Character, rodTool }) do
+		local v = o and o:GetAttribute("FishingSelectedRodId")
+		if v then
+			return v
+		end
+	end
+	return lastRodSent -- attribute not readable: trust what we sent last
+end
+
+local function entryOf(d, id)
+	for _, e in ipairs(d and d.entries or {}) do
+		if e.id == id then
+			return e
+		end
+	end
+end
+
+-- ask the server for the bait list and wait for the BaitState answer
+local function fetchBait()
+	local r = getRemote()
+	if not r then
+		return nil
+	end
+	local t0 = baitAt
+	r:FireServer("GetBaitState")
+	local deadline = os.clock() + 3
+	while STATE.alive() and os.clock() < deadline and baitAt == t0 do
+		task.wait(0.1)
+	end
+	return baitAt ~= t0 and baitData or nil
+end
+
+-- which bait we want: a fixed id, or the most expensive unlocked one within the price cap
+local function wantedBait(d)
+	if AF.autoBait == "off" then
+		return nil
+	end
+	if AF.autoBait ~= "auto" then
+		local e = entryOf(d, AF.autoBait)
+		return e and e.unlocked and e or nil
+	end
+	local now, best = os.clock(), nil
+	for _, e in ipairs(d.entries or {}) do
+		local canBuy = (noBuyUntil[e.id] or 0) < now
+		if e.unlocked and e.price <= AF.baitMaxPrice and (e.count > 0 or canBuy) then
+			if not best or e.price > best.price then
+				best = e
+			end
+		end
+	end
+	return best
+end
+
+local function runMaint()
+	if maint or selling then
+		return
+	end
+	maint = true
+	local ok, err = pcall(function()
+		local d = fetchBait()
+		local r = getRemote()
+		if not (d and r) then
+			log("MAINT: no BaitState")
+			return
+		end
+		local want = wantedBait(d)
+		if want and want.count <= BAIT_LOW and (noBuyUntil[want.id] or 0) < os.clock() then
+			log("BUY %s (stock %d, %s per piece)", want.id, want.count, tostring(want.price))
+			r:FireServer("BuyBait", want.id)
+			task.wait(0.5)
+			local d2 = fetchBait()
+			local e2 = d2 and entryOf(d2, want.id)
+			if e2 and e2.count > want.count then
+				log("BOUGHT %s: stock %d -> %d", want.id, want.count, e2.count)
+				d, want = d2, e2
+			else
+				noBuyUntil[want.id] = os.clock() + 120 -- most likely no coins: do not spam, fall back for a while
+				log("BUY %s failed (stock unchanged), retry in 120 s", want.id)
+				d = d2 or d
+				want = wantedBait(d)
+			end
+		end
+		if want and want.count > 0 and d.selectedBaitId ~= want.id then
+			log("SELECT bait %s", want.id)
+			r:FireServer("SelectBait", want.id)
+			task.wait(0.4)
+		end
+		if AF.autoRod then -- last: switching the rod recreates the Tool
+			local rod = bestRod(tonumber(d.fisherLevel) or 1)
+			if rod ~= currentRodId() and os.clock() - lastRodPick > 30 then
+				lastRodPick, lastRodSent = os.clock(), rod
+				log("SELECT rod %s (fisher level %s)", rod, tostring(d.fisherLevel))
+				r:FireServer("SelectRod", rod)
+			end
+		end
+	end)
+	if not ok then
+		log("maint error: %s", tostring(err))
+	end
+	maint = false
+end
+
 local function applySettings()
 	due, reelDue = {}, nil
 	saveSettings()
@@ -806,11 +942,14 @@ local function tick()
 
 	if st == "None" then
 		equipRod(now)
-		if sellPending and not selling then
+		if sellPending and not selling and not maint then
 			task.spawn(runSell)
-		elseif not selling and not castBtn.Visible then
+		elseif maintPending and not selling and not maint and rodTool.Parent == P.Character then
+			maintPending = false
+			task.spawn(runMaint)
+		elseif not selling and not maint and not castBtn.Visible then
 			dismissOk(now, st) -- cannot cast: most likely the OK button is still up
-		elseif not selling and castBtn.Visible and castBtn.Text == "CAST" then
+		elseif not selling and not maint and castBtn.Visible and castBtn.Text == "CAST" then
 			local lo, hi = 0, 0
 			if AF.pauses then
 				lo, hi = 0.3, 1.5
@@ -1010,6 +1149,10 @@ local function buildGui()
 		{ "af_humanize", "human", { "off", "low", "normal", "high" } },
 		{ "af_mouse", "mouse", { false, true } },
 		{ "af_pauses", "pauses", { true, false } },
+		"gap",
+		{ "af_autorod", "autoRod", { true, false } },
+		{ "af_autobait", "autoBait", { "off", "auto", "Dough", "Worm", "Shrimp", "Shimmer", "DeepSea", "Ancient" } },
+		{ "af_baitcap", "baitMaxPrice", { 1, 3, 6, 15, 30, 50 } },
 		"gap",
 		{ "af_sell", "sell", { false, true } },
 		{ "af_sellevery", "sellEvery", { 1, 3, 5, 10, 20 } },
