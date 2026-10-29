@@ -8,7 +8,7 @@
 -- executor's workspace folder and set BASE = "AutoFarmHub/files/" (anything not starting with "http"
 -- is read with readfile).
 
-local BASE = "https://raw.githubusercontent.com/misavasilevic041-tech/script/refs/heads/main/"
+local BASE = "https://raw.githubusercontent.com/YOURNAME/YOURREPO/main/"
 
 local FILES = {
 	core = "core.luau",
@@ -23,6 +23,9 @@ local function fetch(name)
 			return game:HttpGet(BASE .. name .. "?t=" .. os.time())
 		end)
 		if ok and type(res) == "string" and #res > 0 then
+			if res:sub(1, 3) == "404" then -- raw.githubusercontent answers a missing file with the text "404: Not Found"
+				return nil, "404 Not Found: " .. BASE .. name
+			end
 			return res
 		end
 		return nil, tostring(res)
