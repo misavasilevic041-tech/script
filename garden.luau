@@ -1,3 +1,4 @@
+-- v5.0 (hub v3): no start/stop log lines of its own (the core writes [LOAD]/[UNLOAD]), the X button asks first.
 -- AutoFarm v4.9 (hub build): v4.8.1 under the hub, farm logic untouched. Core log / language RU-EN / saved settings /
 -- toasts / autopause (the hub-wide switch). Base: v4.8 + TEMPORARY cycle diagnostics (stat line: cycle / grow / eff). Farm logic untouched.
 --
@@ -1947,21 +1948,25 @@ unload = function()
         pcall(off)
     end
     G.AFARM, G._AFARM_THREADS, G._AFARM_CONNS = nil, nil, nil
-    Core.log("AFARM", "unloaded")
     Core.toast(T("g_unload"), "info", 2)
 end
 AF.unload = unload
 closeBtn.Activated:Connect(function()
-    if STATE and STATE.stop then
-        STATE.stop() -- runs unload() through onCleanup
-    else
-        unload()
-    end
-    task.delay(2.5, function() -- nothing else needs the shared module once the only farm is gone
-        if Core.unload then
-            Core.unload()
-        end
-    end)
+    Core.confirm({
+        titleKey = "confirm_title", textKey = "confirm_text", yesKey = "confirm_yes", noKey = "confirm_no",
+        onYes = function()
+            if STATE and STATE.stop then
+                STATE.stop() -- runs unload() through onCleanup
+            else
+                unload()
+            end
+            task.delay(2.5, function() -- nothing else needs the shared module once the only farm is gone
+                if Core.unload then
+                    Core.unload()
+                end
+            end)
+        end,
+    })
 end)
 langOffs[#langOffs + 1] = Core.onLang(function()
     refresh()
@@ -2147,4 +2152,3 @@ end
 if AF.trace then
     pcall(AF.crops)
 end
-print("[AFARM] loaded. mode=" .. AF.mode)
