@@ -1,4 +1,4 @@
--- AutoFarm Hub: shared module (Core) v1.0
+-- AutoFarm Hub: shared module (Core) v1.1
 -- Provides: languages, settings saving, log, toasts, panel, copy-log button, farm scopes.
 -- Loaded by hub.luau, stored in getgenv().HubCore. Farm scripts take everything from there.
 --
@@ -12,6 +12,12 @@
 --   Core.panel{titleKey=, size=, pos=, onClose=}   draggable panel with lang / log / X buttons
 --   Core.newScope() / Core.launch(name, source)   scope = {connect, onCleanup, alive, stop}
 --   Core.unload()                 stops the running farm, saves, destroys the GUI
+--   v1.1:
+--   Core.getGlobal(key, default) / Core.setGlobal(key, value)   hub-wide saved settings (autopause, watchdog)
+--   Core.paused()                 true while autopause is on and the window is unfocused or the Roblox menu is open
+--   Core.watchdog(scope, {name=, getProgress=fn->number, isActive=fn->bool, onStall=fn, minutes=})
+--                                 no progress for N minutes -> log + toast + onStall() (usually restarts the loop)
+--   Core.onRespawn(scope, fn)     fn(character) after every respawn (death, teleport)
 
 local env = (getgenv and getgenv()) or _G
 local Players = game:GetService("Players")
@@ -24,7 +30,7 @@ if env.HubCore and env.HubCore.unload then
 	pcall(env.HubCore.unload)
 end
 
-local Core = { VERSION = "1.0", dead = false }
+local Core = { VERSION = "1.1", dead = false }
 env.HubCore = Core
 
 local function copy(v)
@@ -66,7 +72,7 @@ end
 -- ============================================================
 local FOLDER, FILE = "AutoFarmHub", "AutoFarmHub/settings.json"
 local fsOk = type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
-local data = { lang = "ru", farms = {} }
+local data = { lang = "ru", farms = {}, global = {} }
 
 if fsOk then
 	local ok, raw = pcall(function()
@@ -84,6 +90,9 @@ if fsOk then
 			end
 			if type(dec.farms) == "table" then
 				data.farms = dec.farms
+			end
+			if type(dec.global) == "table" then
+				data.global = dec.global
 			end
 		else
 			Core.log("CORE", "settings file is broken, using defaults")
@@ -151,6 +160,20 @@ function Core.setFarm(name, tbl)
 	Core.save()
 end
 
+-- hub-wide settings (autopause, watchdog); same file, own table
+function Core.getGlobal(key, default)
+	local v = data.global[key]
+	if v ~= nil and type(v) == type(default) then
+		return v
+	end
+	return default
+end
+
+function Core.setGlobal(key, value)
+	data.global[key] = value
+	Core.save()
+end
+
 -- ============================================================
 -- Languages
 -- ============================================================
@@ -166,6 +189,11 @@ local DICT = {
 		log_file = "Буфер обмена недоступен, лог сохранён в файл: %s",
 		log_fail = "Не удалось скопировать лог",
 		lang_label = "язык",
+		g_autopause = "автопауза",
+		g_watchdog = "защита от зависаний",
+		wd_stall = "%s: нет прогресса %d мин, перезапускаю цикл",
+		wd_warn = "%s: нет прогресса %d мин",
+		paused = "пауза (окно неактивно или открыто меню)",
 	},
 	en = {
 		v_on = "on",
@@ -177,6 +205,11 @@ local DICT = {
 		log_file = "Clipboard unavailable, log saved to file: %s",
 		log_fail = "Could not copy the log",
 		lang_label = "language",
+		g_autopause = "autopause",
+		g_watchdog = "stall protection",
+		wd_stall = "%s: no progress for %d min, restarting the loop",
+		wd_warn = "%s: no progress for %d min",
+		paused = "paused (window inactive or game menu open)",
 	},
 }
 
@@ -444,6 +477,67 @@ function Core.panel(opts)
 		Position = UDim2.fromOffset(0, 30), Size = UDim2.new(1, 0, 1, -30), BackgroundTransparency = 1,
 	})
 	return { root = root, body = body, title = title, close = closeBtn }
+end
+
+-- ============================================================
+-- Autopause, watchdog, respawn (v1.1)
+-- ============================================================
+local UIS = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
+local focused = true
+UIS.WindowFocused:Connect(function()
+	focused = true
+end)
+UIS.WindowFocusReleased:Connect(function()
+	focused = false
+end)
+
+function Core.paused()
+	if not Core.getGlobal("autopause", false) then
+		return false
+	end
+	local menu = false
+	pcall(function()
+		menu = GuiService.MenuIsOpen
+	end)
+	return (not focused) or menu
+end
+
+function Core.watchdog(scope, o)
+	local name = o.name or "farm"
+	local lastProg, lastT, warned = nil, os.clock(), false
+	local alive = true
+	scope.onCleanup(function()
+		alive = false
+	end)
+	task.spawn(function()
+		while alive and scope.alive() and not Core.dead do
+			task.wait(5)
+			local now = os.clock()
+			local mins = o.minutes or Core.getGlobal("stallMin", 5)
+			local prog = o.getProgress and o.getProgress() or 0
+			local active = (not o.isActive) or o.isActive()
+			if not active or Core.paused() or not Core.getGlobal("watchdog", true) or prog ~= lastProg then
+				lastProg, lastT, warned = prog, now, false
+			elseif now - lastT >= mins * 60 then
+				Core.log("WD", "%s: no progress for %d min", name, mins)
+				if o.onStall then
+					Core.toast(Core.t("wd_stall", name, mins), "warn", 5)
+					pcall(o.onStall)
+				else
+					Core.toast(Core.t("wd_warn", name, mins), "warn", 5)
+				end
+				lastT = now
+			end
+		end
+	end)
+end
+
+function Core.onRespawn(scope, fn)
+	return scope.connect(P.CharacterAdded, function(ch)
+		Core.log("CORE", "respawn detected")
+		task.spawn(fn, ch)
+	end)
 end
 
 -- ============================================================
