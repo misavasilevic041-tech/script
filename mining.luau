@@ -10,6 +10,8 @@
 	  * подбор: один телепорт забирает все дропы в зоне досягаемости
 	  * меню: ⚙ настройки, ✕ полная выгрузка (loops + connections + GUI)
 
+	v5.2 (хаб v3): своих строк «загружен/выгружен» в логе нет (их пишет ядро), крестик спрашивает подтверждение.
+
 	v5.1 (запуск из хаба, логика добычи не тронута):
 	  * панель, язык (RU/EN), кнопка «лог» и тосты берутся из Core
 	  * настройки сохраняются (AutoFarmHub/settings.json), включённость не сохраняется
@@ -648,11 +650,8 @@ local function unload()
 	table.clear(skip)
 	pcall(function() panel.root:Destroy() end)
 	if env.MFarmUnload == unload then env.MFarmUnload = nil end
-	Core.log("MFARM", "unloaded")
 	Core.toast(T("m_unload"), "info", 2)
 end
 
 env.MFarmUnload = unload
 if STATE then STATE.onCleanup(unload) end
-
-log("v5.1 загружен.")
