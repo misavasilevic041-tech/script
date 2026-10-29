@@ -8,7 +8,7 @@
 -- executor's workspace folder and set BASE = "AutoFarmHub/files/" (anything not starting with "http"
 -- is read with readfile).
 
-local BASE = "https://raw.githubusercontent.com/YOURNAME/YOURREPO/main/"
+local BASE = "https://raw.githubusercontent.com/misavasilevic041-tech/script/refs/heads/main/"
 
 local FILES = {
 	core = "core.luau",
