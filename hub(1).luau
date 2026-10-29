@@ -1,6 +1,6 @@
--- AutoFarm Hub v1.0
+-- AutoFarm Hub v2.0
 -- Menu: [Autofarm] [Settings]. Autofarm opens a side list of 3 farms; after the choice the hub removes
--- its own menu and loads the chosen farm script. v1: fishing is connected, garden and mining come in v2.
+-- its own menu and loads the chosen farm script. v2: garden, fishing and mining are all connected.
 --
 -- Run this file only:
 --   loadstring(game:HttpGet("https://raw.githubusercontent.com/YOURNAME/YOURREPO/main/hub.luau"))()
@@ -13,8 +13,8 @@ local BASE = "https://raw.githubusercontent.com/misavasilevic041-tech/script/ref
 local FILES = {
 	core = "core.luau",
 	fishing = "fishing.luau",
-	-- garden = "garden.luau",  -- v2
-	-- mining = "mining.luau",  -- v2
+	garden = "garden.luau",
+	mining = "mining.luau",
 }
 
 local function fetch(name)
@@ -66,6 +66,7 @@ Core.addStrings({
 		farm_soon = "скоро, v2",
 		hub_soon_toast = "Этот фарм подключим в v2",
 		hub_unload = "выгрузить хаб",
+		hub_global = "Общие настройки",
 		hub_loading = "Загружаю: %s…",
 		hub_net_err = "Не удалось скачать %s",
 		hub_start_err = "Ошибка запуска: %s",
@@ -82,6 +83,7 @@ Core.addStrings({
 		farm_soon = "soon, v2",
 		hub_soon_toast = "This farm comes in v2",
 		hub_unload = "unload hub",
+		hub_global = "Global settings",
 		hub_loading = "Loading: %s…",
 		hub_net_err = "Could not download %s",
 		hub_start_err = "Start error: %s",
@@ -196,7 +198,7 @@ for i, f in ipairs(farmList) do
 end
 
 -- settings (side panel): language, copy log, unload hub
-local setSide = sideFrame(128)
+local setSide = sideFrame(214)
 sides.settings = setSide
 local langBtn = ui.button(setSide, {
 	Position = UDim2.fromOffset(8, 8), Size = UDim2.new(1, -16, 0, 34), TextSize = 14, Font = ui.FONT,
@@ -214,8 +216,28 @@ local copyBtn = ui.button(setSide, {
 Core.bindText(copyBtn, "log_copy")
 copyBtn.Activated:Connect(Core.copyLog)
 
+-- global toggles (saved in the settings file, read by the farms through Core)
+local function globalToggle(y, key, default, labelKey)
+	local b = ui.button(setSide, {
+		Position = UDim2.fromOffset(8, y), Size = UDim2.new(1, -16, 0, 34), TextSize = 13, Font = ui.FONT,
+	})
+	local function upd()
+		local on = Core.getGlobal(key, default)
+		b.Text = T(labelKey) .. ": " .. T(on and "v_on" or "v_off")
+		b.BackgroundColor3 = on and C.GREEN or C.BTN
+	end
+	upd()
+	Core.onLang(upd)
+	b.Activated:Connect(function()
+		Core.setGlobal(key, not Core.getGlobal(key, default))
+		upd()
+	end)
+end
+globalToggle(88, "autopause", false, "g_autopause")
+globalToggle(128, "watchdog", true, "g_watchdog")
+
 local unloadBtn = ui.button(setSide, {
-	Position = UDim2.fromOffset(8, 88), Size = UDim2.new(1, -16, 0, 30), TextSize = 13, Font = ui.FONT,
+	Position = UDim2.fromOffset(8, 172), Size = UDim2.new(1, -16, 0, 30), TextSize = 13, Font = ui.FONT,
 	BackgroundColor3 = C.RED,
 })
 Core.bindText(unloadBtn, "hub_unload")
@@ -230,5 +252,5 @@ mainButton(52, "hub_settings", function()
 	showSide("settings")
 end)
 
-Core.log("HUB", "hub v1.0 ready")
+Core.log("HUB", "hub v2.0 ready")
 Core.toast(T("hub_ready"), "ok", 2)
