@@ -134,7 +134,7 @@ local function log(...)
 end
 
 if not fireproximityprompt then
-	warn("[MFarm] fireproximityprompt не поддерживается этим экзекьютором")
+	warn("[MFarm] fireproximityprompt is not supported by this executor")
 	Core.toast(T("m_unsupported"), "err", 6)
 	return
 end
@@ -213,7 +213,7 @@ if matRoot then
 	for _, f in ipairs(matRoot:GetChildren()) do hookKind(f) end
 	track(matRoot.ChildAdded:Connect(hookKind))
 else
-	warn("[MFarm] workspace.MaterialObjects не найден")
+	warn("[MFarm] workspace.MaterialObjects not found")
 end
 
 -- ===== Дропы (кэш на событиях) =====
@@ -231,7 +231,7 @@ if dropFolder then
 		dropPrompts[d] = nil
 	end))
 else
-	warn("[MFarm] workspace.MaterialFolder не найден")
+	warn("[MFarm] workspace.MaterialFolder not found")
 end
 
 local function getPrompt(g)
@@ -287,11 +287,11 @@ local function diagFail(g)
 	diagged[g.Name] = true
 	local p = getPrompt(g)
 	if not p then
-		log("диагн.", g:GetFullName(), "промпт пропал, дропа не было")
+		log("diag.", g:GetFullName(), "prompt gone, no drop")
 		return
 	end
 	local o = orig[p]
-	log(string.format("диагн. %s | Action=%s Object=%s Hold=%s Enabled=%s Dist=%s",
+	log(string.format("diag. %s | Action=%s Object=%s Hold=%s Enabled=%s Dist=%s",
 		g:GetFullName(), tostring(p.ActionText), tostring(p.ObjectText),
 		tostring(o and o[1] or p.HoldDuration), tostring(p.Enabled), tostring(p.MaxActivationDistance)))
 end
@@ -398,7 +398,7 @@ local function collect(pos, hrp)
 		pickupNear(hrp, d)
 		task.wait(0.1)
 		if d.Parent and (tries[d] or 0) >= 3 then
-			warn("[MFarm] дроп не подобрался после 3 попыток:", d:GetFullName())
+			warn("[MFarm] drop not picked up after 3 tries:", d:GetFullName())
 		end
 	end
 end
@@ -445,7 +445,7 @@ local function farmLoop(myId)
 				else
 					if hrp.Parent then -- если персонаж умер посреди добычи, это не сбой ресурса
 						skip[g] = os.clock() + CFG.FailSkip
-						log("нет дропа после ударов:", g:GetFullName())
+						log("no drop after hits:", g:GetFullName())
 						diagFail(g)
 					end
 				end
