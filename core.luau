@@ -1,5 +1,6 @@
--- AutoFarm Hub: shared module (Core) v1.3
--- Provides: languages, settings saving, log, toasts, panel, copy-log button, farm scopes.
+-- AutoFarm Hub: shared module (Core) v2.0
+-- Provides: languages, settings saving, log, toasts, panel, copy-log button, farm scopes, buff (cooking) system,
+-- the small dock window of a running farm (back to the hub + buff controls).
 -- Loaded by hub.luau, stored in getgenv().HubCore. Farm scripts take everything from there.
 --
 --   Core.t(key, ...)              translated string (fallback: en, then the key itself)
@@ -22,11 +23,14 @@
 --   Core.logLoad(name) / Core.logUnload(name)   the only start/stop lines in the log: "[LOAD] x" / "[UNLOAD] x"
 --   Core.confirm{titleKey=|title=, textKey=|text=, yesKey=|yes=, noKey=|no=, onYes=fn, onNo=fn}   modal window, fades in/out
 --   Core.panel: the X button now asks for confirmation before calling onClose
---   v1.3 (modules: add-ons of a farm, live in a nested scope inside the farm scope):
---   Core.launchModule(name, src)  runs a module script; it receives (scope, farmScope) as varargs: local scope, farm = ...
---                                 stops together with the farm, or alone; own [LOAD] / [UNLOAD] lines
---   Core.unloadModule(name)       stops one module, the farm keeps working
---   Core.modules                  name -> scope of the running modules
+--   v2.0 (the module system of v1.3 is removed; buff and languages live here, one system for all farms):
+--   Core.buffBusy()               true while the buff wants the player's hands (waiting for a safe moment, cooking, dish in hand);
+--                                 a farm that swaps tools itself (fishing: the rod) must not do it while this is true
+--   Core.buffSafe                 optional hook a farm sets: fn -> bool, "tools can be swapped right now" (default: always)
+--   Core.farmActive               optional hook a farm sets: fn -> bool, "the farm is switched on" (the buff cooks only then)
+--   Core.toggleHub                set by the hub: opens / closes the hub menu without touching the running farm
+--   Buff settings per farm (saved as "buff_<farm>"): on / dish / lead (cook when the buff has <= lead seconds left)
+--   Dock window: [Hub] button, buff on/off, status line, dish choice, lead time. Created with every farm, destroyed with it.
 
 local env = (getgenv and getgenv()) or _G
 local Players = game:GetService("Players")
@@ -39,7 +43,7 @@ if env.HubCore and env.HubCore.unload then
 	pcall(env.HubCore.unload)
 end
 
-local Core = { VERSION = "1.3", dead = false }
+local Core = { VERSION = "2.0", dead = false }
 env.HubCore = Core
 
 local function copy(v)
@@ -219,6 +223,22 @@ local DICT = {
 		reload_title = "ПЕРЕЗАГРУЗКА",
 		reload_text = "Скрипт уже запущен. Перезагрузить? Текущая работа остановится, настройки сохранятся.",
 		reload_yes = "Перезагрузить",
+		dock_hub = "☰ Хаб",
+		buff_label = "Бафф",
+		buff_off = "бафф выключен",
+		buff_none = "бафф: нет",
+		buff_left = "бафф: %s",
+		buff_wait = "жду паузу в работе…",
+		buff_cooking = "готовлю: %s",
+		buff_dish = "блюдо: %s",
+		buff_lead = "готовить за %d с",
+		buff_eat = "Съешь блюдо сейчас!",
+		buff_cooked = "Блюдо готово и в руке",
+		buff_no_fish = "Нет рыбы для блюда «%s»",
+		buff_fail = "Готовка не удалась: %s",
+		buff_multi = "В инвентаре несколько блюд: съешь лишнее или сделай ресет",
+		buff_other = "В инвентаре другое блюдо (%s), готовка пропущена",
+		buff_stuck = "Не дождался паузы в работе, повторю позже",
 	},
 	en = {
 		v_on = "on",
@@ -242,6 +262,22 @@ local DICT = {
 		reload_title = "RELOAD",
 		reload_text = "The script is already running. Reload it? Current work will stop, settings are kept.",
 		reload_yes = "Reload",
+		dock_hub = "☰ Hub",
+		buff_label = "Buff",
+		buff_off = "buff is off",
+		buff_none = "buff: none",
+		buff_left = "buff: %s",
+		buff_wait = "waiting for a pause…",
+		buff_cooking = "cooking: %s",
+		buff_dish = "dish: %s",
+		buff_lead = "cook at %d s left",
+		buff_eat = "Eat the dish now!",
+		buff_cooked = "Dish is ready and in your hand",
+		buff_no_fish = "No fish for the dish \"%s\"",
+		buff_fail = "Cooking failed: %s",
+		buff_multi = "Several dishes in the inventory: eat the extra one or reset",
+		buff_other = "Another dish is in the inventory (%s), cooking skipped",
+		buff_stuck = "No pause in the work came, will try again later",
 	},
 }
 
@@ -695,13 +731,388 @@ function Core.newScope()
 	return s
 end
 
--- runs a farm script (source text) with a fresh scope in STATE
+-- ============================================================
+-- Buff (v2.0): semi-automatic cooking helper, one system for all farms.
+-- Shortly before the food buff ends it cooks the dish of the farm, takes it into the hand and asks the player to
+-- eat it (eating is a real click, scripts cannot do it). Never more than one dish at a time: with a dish already in
+-- the inventory nothing is cooked. Protocol: ToolEvent Get "Frying Pan" -> CookingRemotes.GetState / Start / Finish /
+-- UseDish("Equip"). Buff timer: player attribute FoodBuffExpiresAt (server time).
+-- Only "GrilledFish" is confirmed in the game; the other recipe ids are built the same way and are untested:
+-- a wrong id just ends in a "cooking failed" message from the server.
+-- ============================================================
+local RS = game:GetService("ReplicatedStorage")
+
+local BUFF = {
+	fishing = { { recipe = "GrilledFish", tool = "Grilled Fish", needFish = true } },
+	mining = { { recipe = "BreadRoll", tool = "Bread Roll" }, { recipe = "Onigiri", tool = "Onigiri" } },
+	garden = { { recipe = "Taco", tool = "Taco" } },
+}
+local PAN = "Frying Pan"
+local DISH_NAMES = {} -- every known dish tool, so that a second dish is never cooked
+for _, n in ipairs({
+	"Grilled Fish", "Sushi", "Squid Nigiri", "Tuna Nigiri", "Bonito Roll", "Ramen",
+	"Taco", "Veggie Sandwich", "Vegetable Noodles", "Veggie Burger", "Tomato Pizza",
+	"French Fries", "Bread Roll", "Onigiri", "Croissant",
+	"Pancakes", "Donuts", "Cupcake", "Lemon Muffin", "Fruit Cake", "Apple Pie",
+}) do
+	DISH_NAMES[n] = true
+end
+local LEADS = { 15, 30, 45, 60 }
+local REMIND_EVERY, REMIND_MAX, RETRY_AFTER, SAFE_WAIT = 10, 6, 120, 90
+
+local B = { want = false, hold = false, msg = nil, msgUntil = 0 }
+
+-- true while the buff needs the player's hands: farms must not swap tools / start a new action meanwhile
+function Core.buffBusy()
+	return B.want or B.hold
+end
+
+local function farmActive(farm)
+	if Core.farmActive then
+		local ok, r = pcall(Core.farmActive)
+		if ok then
+			return r ~= false
+		end
+	end
+	local a = (farm == "fishing" and env.AF) or (farm == "garden" and env.AFARM)
+	if type(a) == "table" then
+		return a.enabled == true
+	end
+	return true
+end
+
+local function startBuff(scope, farm)
+	local options = BUFF[farm]
+	if not options then
+		return
+	end
+	B.want, B.hold, B.msg = false, false, nil
+	local cfg = Core.getFarm("buff_" .. farm, { on = false, dish = options[1].recipe, lead = 30 })
+	local function save()
+		Core.setFarm("buff_" .. farm, cfg)
+	end
+	local function optOf(id)
+		for _, o in ipairs(options) do
+			if o.recipe == id then
+				return o
+			end
+		end
+		return options[1]
+	end
+	local function setMsg(text, secs)
+		B.msg, B.msgUntil = text, os.clock() + (secs or 6)
+	end
+
+	-- ----- tools -----
+	local function eachHolder(fn)
+		local c = P.Character
+		if c then
+			fn(c)
+		end
+		local bp = P:FindFirstChildOfClass("Backpack")
+		if bp then
+			fn(bp)
+		end
+	end
+	local function findTool(name)
+		local found
+		eachHolder(function(h)
+			if not found then
+				local t = h:FindFirstChild(name)
+				if t and t:IsA("Tool") then
+					found = t
+				end
+			end
+		end)
+		return found
+	end
+	local function dishes()
+		local list = {}
+		eachHolder(function(h)
+			for _, t in ipairs(h:GetChildren()) do
+				if t:IsA("Tool") and DISH_NAMES[t.Name] then
+					list[#list + 1] = t
+				end
+			end
+		end)
+		return list
+	end
+	local function equip(tool)
+		local hum = P.Character and P.Character:FindFirstChildOfClass("Humanoid")
+		if hum and tool then
+			pcall(function()
+				hum:EquipTool(tool)
+			end)
+		end
+	end
+	local function buffLeft()
+		local e = P:GetAttribute("FoodBuffExpiresAt")
+		if type(e) ~= "number" then
+			return 0
+		end
+		return math.max(0, e - workspace:GetServerTimeNow())
+	end
+	local function inv(remote, ...)
+		local args = table.pack(...)
+		local ok, res = pcall(function()
+			return remote:InvokeServer(table.unpack(args, 1, args.n))
+		end)
+		return ok and res or nil
+	end
+
+	-- ----- cooking: returns the dish tool, or nil + reason -----
+	local function cook(opt)
+		local CK = RS:FindFirstChild("CookingRemotes")
+		if not CK then
+			return nil, "CookingRemotes"
+		end
+		local pan = findTool(PAN)
+		if not pan then
+			pcall(function()
+				RS.Events.ToolEvent:FireServer("Get", PAN)
+			end)
+			for _ = 1, 30 do
+				pan = findTool(PAN)
+				if pan then
+					break
+				end
+				task.wait(0.1)
+			end
+		end
+		if not pan then
+			return nil, PAN
+		end
+		equip(pan)
+		task.wait(0.6)
+		local st = inv(CK.GetState)
+		if opt.needFish and st and (st.fishCount or 0) <= 0 then
+			return nil, "nofish"
+		end
+		local s = inv(CK.Start, opt.recipe)
+		if not (s and s.ok and s.token and s.targets) then
+			return nil, s and s.message or "Start"
+		end
+		task.wait(2 + math.random())
+		local f = inv(CK.Finish, s.token, { s.targets[1] + (math.random() - 0.5) * 0.02 })
+		if not (f and f.ok) then
+			return nil, f and f.message or "Finish"
+		end
+		inv(CK.UseDish, "Equip", opt.recipe)
+		for _ = 1, 30 do
+			local d = findTool(opt.tool)
+			if d then
+				return d
+			end
+			task.wait(0.1)
+		end
+		return nil, opt.tool
+	end
+
+	-- dish in hand: remind until the player eats it (the buff is renewed) or the reminders run out
+	local function holdAndRemind(dish)
+		if dish.Parent ~= P.Character then
+			equip(dish)
+			task.wait(0.4)
+		end
+		B.hold = true
+		for _ = 1, REMIND_MAX do
+			if not scope.alive() or buffLeft() > cfg.lead or not dish.Parent then
+				break
+			end
+			Core.toast(Core.t("buff_eat"), "warn", 4)
+			for _ = 1, REMIND_EVERY do
+				if not scope.alive() or buffLeft() > cfg.lead or not dish.Parent then
+					break
+				end
+				task.wait(1)
+			end
+		end
+		B.hold = false
+	end
+
+	local function prepare(opt)
+		-- guard: never more than one dish (a second one makes every dish uneatable until a reset)
+		local list = dishes()
+		if #list > 1 then
+			Core.log("BUFF", "%d dishes in the inventory, nothing cooked", #list)
+			Core.toast(Core.t("buff_multi"), "warn", 6)
+			setMsg(Core.t("buff_multi"), 20)
+			return false
+		end
+		local dish = list[1]
+		if dish and dish.Name ~= opt.tool then
+			Core.log("BUFF", "another dish in the inventory: %s", dish.Name)
+			Core.toast(Core.t("buff_other", dish.Name), "warn", 6)
+			setMsg(Core.t("buff_other", dish.Name), 20)
+			return false
+		end
+		-- wait for a moment when the farm can give up its tools (the farm pauses new actions while B.want is set)
+		B.want = true
+		local t0 = os.clock()
+		while scope.alive() do
+			local ok, safe = true, true
+			if Core.buffSafe then
+				ok, safe = pcall(Core.buffSafe)
+			end
+			if ok and safe then
+				break
+			end
+			if os.clock() - t0 > SAFE_WAIT then
+				B.want = false
+				Core.log("BUFF", "no safe moment within %d s", SAFE_WAIT)
+				Core.toast(Core.t("buff_stuck"), "warn", 4)
+				return false
+			end
+			task.wait(0.2)
+		end
+		if not scope.alive() then
+			B.want = false
+			return false
+		end
+		B.hold, B.want = true, false -- no yield between the check and this: the farm cannot slip in
+		if not dish then
+			setMsg(Core.t("buff_cooking", opt.tool), 8)
+			local d, why = cook(opt)
+			if not d then
+				B.hold = false
+				if why == "nofish" then
+					Core.toast(Core.t("buff_no_fish", opt.tool), "warn", 5)
+					setMsg(Core.t("buff_no_fish", opt.tool), 20)
+				else
+					Core.log("BUFF", "cooking failed: %s", tostring(why))
+					Core.toast(Core.t("buff_fail", tostring(why)), "err", 5)
+					setMsg(Core.t("buff_fail", tostring(why)), 20)
+				end
+				return false
+			end
+			dish = d
+			Core.toast(Core.t("buff_cooked"), "ok", 3)
+		end
+		holdAndRemind(dish)
+		return true
+	end
+
+	-- ----- loop -----
+	task.spawn(function()
+		local retryAt = 0
+		while scope.alive() and not Core.dead do
+			task.wait(2)
+			if cfg.on and os.clock() >= retryAt and not Core.paused() and farmActive(farm) and buffLeft() <= cfg.lead then
+				local ok, err = pcall(prepare, optOf(cfg.dish))
+				B.want, B.hold = false, false
+				if not ok then
+					Core.log("BUFF", "error: %s", tostring(err))
+				end
+				retryAt = os.clock() + RETRY_AFTER
+			end
+		end
+	end)
+
+	-- ----- dock window -----
+	local g = Core.gui()
+	if not g then
+		return
+	end
+	local root = ui.mk("Frame", g, {
+		Name = "FarmDock", Size = UDim2.fromOffset(196, 92), Position = UDim2.new(1, -216, 0, 70),
+		BackgroundColor3 = C.BG, BorderSizePixel = 0, Active = true, Draggable = true,
+	})
+	ui.round(root, 8)
+	local hubBtn = ui.button(root, { Position = UDim2.fromOffset(6, 6), Size = UDim2.fromOffset(62, 28), TextSize = 12 })
+	local buffBtn = ui.button(root, { Position = UDim2.fromOffset(72, 6), Size = UDim2.new(1, -78, 0, 28), TextSize = 12 })
+	local stat = ui.label(root, {
+		Position = UDim2.fromOffset(8, 38), Size = UDim2.new(1, -16, 0, 18), TextSize = 11, TextColor3 = C.GRAY,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	})
+	local dishBtn = ui.button(root, {
+		Position = UDim2.fromOffset(6, 60), Size = UDim2.new(0.5, -9, 0, 26), TextSize = 11, Font = ui.FONT,
+	})
+	local leadBtn = ui.button(root, {
+		Position = UDim2.new(0.5, 3, 0, 60), Size = UDim2.new(0.5, -9, 0, 26), TextSize = 11, Font = ui.FONT,
+	})
+	Core.bindText(hubBtn, "dock_hub")
+
+	local function statusText()
+		if not cfg.on then
+			return Core.t("buff_off")
+		end
+		if B.msg and os.clock() < B.msgUntil then
+			return B.msg
+		end
+		if B.hold then
+			return Core.t("buff_eat")
+		end
+		if B.want then
+			return Core.t("buff_wait")
+		end
+		local left = buffLeft()
+		if left > 0 then
+			return Core.t("buff_left", string.format("%d:%02d", math.floor(left / 60), math.floor(left % 60)))
+		end
+		return Core.t("buff_none")
+	end
+	local function refresh()
+		buffBtn.Text = Core.t("buff_label") .. ": " .. Core.t(cfg.on and "v_on" or "v_off")
+		buffBtn.BackgroundColor3 = cfg.on and C.GREEN or C.BTN
+		dishBtn.Text = Core.t("buff_dish", optOf(cfg.dish).tool)
+		leadBtn.Text = Core.t("buff_lead", cfg.lead)
+		stat.Text = statusText()
+	end
+	refresh()
+
+	hubBtn.Activated:Connect(function()
+		if Core.toggleHub then
+			Core.toggleHub()
+		end
+	end)
+	buffBtn.Activated:Connect(function()
+		cfg.on = not cfg.on
+		B.msg = nil
+		save()
+		refresh()
+	end)
+	dishBtn.Activated:Connect(function()
+		for i, o in ipairs(options) do
+			if o.recipe == cfg.dish then
+				cfg.dish = options[i % #options + 1].recipe
+				break
+			end
+		end
+		save()
+		refresh()
+	end)
+	leadBtn.Activated:Connect(function()
+		local i = table.find(LEADS, cfg.lead) or 0
+		cfg.lead = LEADS[i % #LEADS + 1]
+		save()
+		refresh()
+	end)
+	local offLang = Core.onLang(refresh)
+	task.spawn(function()
+		while scope.alive() and root.Parent do
+			pcall(function()
+				stat.Text = statusText()
+			end)
+			task.wait(1)
+		end
+	end)
+	scope.onCleanup(function()
+		B.want, B.hold = false, false
+		pcall(offLang)
+		pcall(root.Destroy, root)
+	end)
+end
+
+-- ============================================================
+-- Farm launch: runs a farm script (source text) with a fresh scope; the dock window comes with it
+-- ============================================================
 function Core.launch(name, src)
 	if Core.farmScope then
 		pcall(Core.farmScope.stop)
 	end
 	local scope = Core.newScope()
 	Core.farmScope, Core.farmName = scope, name
+	Core.farmActive, Core.buffSafe = nil, nil -- hooks of the previous farm
 	scope.after = function()
 		Core.logUnload(name)
 	end
@@ -722,52 +1133,11 @@ function Core.launch(name, src)
 			Core.toast(name .. ": " .. tostring(e), "err", 6)
 		end
 	end)
+	local okB, eB = pcall(startBuff, scope, name)
+	if not okB then
+		Core.log("CORE", "buff start error: %s", tostring(eB))
+	end
 	return true
-end
-
--- ============================================================
--- Modules (v1.3): add-on of the running farm, nested scope inside the farm scope
--- ============================================================
-Core.modules = {}
-
-function Core.launchModule(name, src)
-	local farm = Core.farmScope
-	if not farm or farm.dead then
-		return false, "no running farm"
-	end
-	local fn, err = loadstring(src, "=" .. name)
-	if not fn then
-		Core.log("CORE", "compile error in %s: %s", name, tostring(err))
-		return false, tostring(err)
-	end
-	if Core.modules[name] then
-		pcall(Core.modules[name].stop)
-	end
-	local scope = Core.newScope()
-	Core.modules[name] = scope
-	scope.after = function()
-		Core.logUnload(name)
-		if Core.modules[name] == scope then
-			Core.modules[name] = nil
-		end
-	end
-	farm.onCleanup(scope.stop) -- farm stops -> module stops first
-	Core.logLoad(name)
-	task.spawn(function()
-		local ok, e = pcall(fn, scope, farm)
-		if not ok then
-			Core.log("CORE", "runtime error in %s: %s", name, tostring(e))
-			Core.toast(name .. ": " .. tostring(e), "err", 6)
-		end
-	end)
-	return true
-end
-
-function Core.unloadModule(name)
-	local s = Core.modules[name]
-	if s then
-		pcall(s.stop)
-	end
 end
 
 -- ============================================================
