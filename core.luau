@@ -1,4 +1,5 @@
 -- AutoFarm Hub: shared module (Core) v2.0
+-- v2.1: English default on first run, console log off by default, confirm dialog has no full-screen dim layer.
 -- Provides: languages, settings saving, log, toasts, panel, copy-log button, farm scopes, buff (cooking) system,
 -- the small dock window of a running farm (back to the hub + buff controls).
 -- Loaded by hub.luau, stored in getgenv().HubCore. Farm scripts take everything from there.
@@ -73,7 +74,11 @@ function Core.log(tag, fmt, ...)
 	if #logBuf > LOGMAX then
 		table.remove(logBuf, 1)
 	end
-	print("[" .. tag .. "] " .. s)
+	-- console output is OFF by default (hub settings: console log); the buffer for [copy log] always fills
+	local gg = Core.getGlobal
+	if gg and gg("console_log", false) then
+		print("[" .. tag .. "] " .. s)
+	end
 end
 
 function Core.logText()
@@ -94,7 +99,7 @@ end
 -- ============================================================
 local FOLDER, FILE = "AutoFarmHub", "AutoFarmHub/settings.json"
 local fsOk = type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
-local data = { lang = "ru", farms = {}, global = {} }
+local data = { lang = "en", farms = {}, global = {} } -- first run (no settings file): English
 
 if fsOk then
 	local ok, raw = pcall(function()
@@ -199,7 +204,7 @@ end
 -- ============================================================
 -- Languages
 -- ============================================================
-Core.LANGS = { "ru", "en" }
+Core.LANGS = { "en", "ru" }
 local DICT = {
 	ru = {
 		v_on = "вкл",
@@ -212,6 +217,7 @@ local DICT = {
 		log_fail = "Не удалось скопировать лог",
 		lang_label = "язык",
 		g_autopause = "автопауза",
+		g_console = "лог в консоль",
 		g_watchdog = "защита от зависаний",
 		wd_stall = "%s: нет прогресса %d мин, перезапускаю цикл",
 		wd_warn = "%s: нет прогресса %d мин",
@@ -251,6 +257,7 @@ local DICT = {
 		log_fail = "Could not copy the log",
 		lang_label = "language",
 		g_autopause = "autopause",
+		g_console = "console log",
 		g_watchdog = "stall protection",
 		wd_stall = "%s: no progress for %d min, restarting the loop",
 		wd_warn = "%s: no progress for %d min",
@@ -503,12 +510,12 @@ function Core.confirm(o)
 		pcall(modal.Destroy, modal)
 	end
 	local dim = mk("TextButton", g, {
-		Name = "Confirm", Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(0, 0, 0),
+		Name = "Confirm", Size = UDim2.fromOffset(300, 156), Position = UDim2.new(0.5, -150, 0.5, -78), BackgroundColor3 = Color3.new(0, 0, 0),
 		BackgroundTransparency = 1, BorderSizePixel = 0, Text = "", AutoButtonColor = false, ZIndex = 50,
 	})
-	modal = dim -- the dim layer also swallows clicks, so nothing below can be pressed meanwhile
+	modal = dim -- no full-screen dim layer anymore: only the dialog box itself takes clicks, everything else stays usable
 	local box = mk("CanvasGroup", dim, {
-		Size = UDim2.fromOffset(300, 156), Position = UDim2.new(0.5, -150, 0.5, -78), BackgroundColor3 = C.BG,
+		Size = UDim2.fromScale(1, 1), BackgroundColor3 = C.BG,
 		BorderSizePixel = 0, GroupTransparency = 1,
 	})
 	ui.round(box, 10)
@@ -557,7 +564,6 @@ function Core.confirm(o)
 	pcall(function()
 		local ti = TweenInfo.new(0.15)
 		TweenService:Create(box, ti, { GroupTransparency = 0 }):Play()
-		TweenService:Create(dim, ti, { BackgroundTransparency = 0.5 }):Play()
 	end)
 end
 
