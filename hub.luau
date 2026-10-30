@@ -1,4 +1,5 @@
--- AutoFarm Hub v3.2
+-- AutoFarm Hub v3.3
+-- v3.3: English is the default language on the first run; console log is OFF by default (settings: console log).
 -- v3.2: the module system is gone. Buff (cooking) and languages live in the core and work for all three farms.
 -- Every started farm gets a small dock window with a [Hub] button: it opens this menu again WITHOUT stopping the farm.
 -- Picking a farm while another one runs asks first (the running farm is stopped). Running the hub again asks "reload?".
@@ -217,7 +218,7 @@ local function main()
 		end
 
 		-- settings (side panel): language, copy log, global toggles, unload hub
-		local setSide = sideFrame(214)
+		local setSide = sideFrame(254)
 		sides.settings = setSide
 		local langBtn = ui.button(setSide, {
 			Position = UDim2.fromOffset(8, 8), Size = UDim2.new(1, -16, 0, 34), TextSize = 14, Font = ui.FONT,
@@ -254,9 +255,10 @@ local function main()
 		end
 		globalToggle(88, "autopause", false, "g_autopause")
 		globalToggle(128, "watchdog", true, "g_watchdog")
+		globalToggle(168, "console_log", false, "g_console")
 
 		local unloadBtn = ui.button(setSide, {
-			Position = UDim2.fromOffset(8, 172), Size = UDim2.new(1, -16, 0, 30), TextSize = 13, Font = ui.FONT,
+			Position = UDim2.fromOffset(8, 212), Size = UDim2.new(1, -16, 0, 30), TextSize = 13, Font = ui.FONT,
 			BackgroundColor3 = C.RED,
 		})
 		Core.bindText(unloadBtn, "hub_unload")
@@ -285,7 +287,7 @@ local function main()
 	end
 
 	buildHub()
-	Core.logLoad("hub 3.2")
+	Core.logLoad("hub 3.3")
 	Core.toast(T("hub_ready"), "ok", 2)
 end
 
