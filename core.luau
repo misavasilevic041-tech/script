@@ -1,4 +1,4 @@
--- AutoFarm Hub: shared module (Core) v1.1
+-- AutoFarm Hub: shared module (Core) v1.3
 -- Provides: languages, settings saving, log, toasts, panel, copy-log button, farm scopes.
 -- Loaded by hub.luau, stored in getgenv().HubCore. Farm scripts take everything from there.
 --
@@ -22,6 +22,11 @@
 --   Core.logLoad(name) / Core.logUnload(name)   the only start/stop lines in the log: "[LOAD] x" / "[UNLOAD] x"
 --   Core.confirm{titleKey=|title=, textKey=|text=, yesKey=|yes=, noKey=|no=, onYes=fn, onNo=fn}   modal window, fades in/out
 --   Core.panel: the X button now asks for confirmation before calling onClose
+--   v1.3 (modules: add-ons of a farm, live in a nested scope inside the farm scope):
+--   Core.launchModule(name, src)  runs a module script; it receives (scope, farmScope) as varargs: local scope, farm = ...
+--                                 stops together with the farm, or alone; own [LOAD] / [UNLOAD] lines
+--   Core.unloadModule(name)       stops one module, the farm keeps working
+--   Core.modules                  name -> scope of the running modules
 
 local env = (getgenv and getgenv()) or _G
 local Players = game:GetService("Players")
@@ -34,7 +39,7 @@ if env.HubCore and env.HubCore.unload then
 	pcall(env.HubCore.unload)
 end
 
-local Core = { VERSION = "1.2", dead = false }
+local Core = { VERSION = "1.3", dead = false }
 env.HubCore = Core
 
 local function copy(v)
@@ -718,6 +723,51 @@ function Core.launch(name, src)
 		end
 	end)
 	return true
+end
+
+-- ============================================================
+-- Modules (v1.3): add-on of the running farm, nested scope inside the farm scope
+-- ============================================================
+Core.modules = {}
+
+function Core.launchModule(name, src)
+	local farm = Core.farmScope
+	if not farm or farm.dead then
+		return false, "no running farm"
+	end
+	local fn, err = loadstring(src, "=" .. name)
+	if not fn then
+		Core.log("CORE", "compile error in %s: %s", name, tostring(err))
+		return false, tostring(err)
+	end
+	if Core.modules[name] then
+		pcall(Core.modules[name].stop)
+	end
+	local scope = Core.newScope()
+	Core.modules[name] = scope
+	scope.after = function()
+		Core.logUnload(name)
+		if Core.modules[name] == scope then
+			Core.modules[name] = nil
+		end
+	end
+	farm.onCleanup(scope.stop) -- farm stops -> module stops first
+	Core.logLoad(name)
+	task.spawn(function()
+		local ok, e = pcall(fn, scope, farm)
+		if not ok then
+			Core.log("CORE", "runtime error in %s: %s", name, tostring(e))
+			Core.toast(name .. ": " .. tostring(e), "err", 6)
+		end
+	end)
+	return true
+end
+
+function Core.unloadModule(name)
+	local s = Core.modules[name]
+	if s then
+		pcall(s.stop)
+	end
 end
 
 -- ============================================================
