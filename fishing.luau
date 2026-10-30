@@ -13,7 +13,6 @@
 --   AF.autoRod / autoBait / baitMaxPrice       v3: auto rod pick, bait pick + auto-buy (see runMaint)
 --   AF.stop()    unload: stop everything, destroy the menu, clear getgenv() entries
 --
--- v2: registers in Core.guard (autopause while dead, restart after death, anti-freeze watchdog).
 -- v1 (hub): runs under the hub. STATE comes from Core.launch, the log goes to Core.log (copy-log button),
 -- settings are saved through Core.getFarm / Core.setFarm, all GUI texts are translated. Fishing logic untouched.
 --   AF.stats, AF.trace (last 900 log lines), AF.state, AF.ready, AF.status
@@ -1244,7 +1243,6 @@ local function buildGui()
 	end
 
 	toggle.Activated:Connect(function()
-		Core.guard.cancel("fishing")
 		AF.enabled = not AF.enabled
 		log("enabled = %s", tostring(AF.enabled))
 		Core.toast(T(AF.enabled and "af_toast_on" or "af_toast_off"), AF.enabled and "ok" or "info", 2)
@@ -1293,34 +1291,17 @@ local function cleanup()
 		AF.langOff()
 	end)
 	saveSettings()
-	pcall(Core.guard.unregister, "fishing")
 	getgenv().AFListener, getgenv().AFGui, getgenv().AFShim = nil, nil, nil
 	log("unloaded")
 	Core.toast(T("af_toast_unload"), "info", 2)
 	getgenv().AF = nil
-	Core.afterFarm(STATE) -- nothing else needs the shared module once the only farm is gone
+	task.delay(2.5, function() -- nothing else needs the shared module once the only farm is gone
+		if Core.unload then
+			Core.unload()
+		end
+	end)
 end
 STATE.onCleanup(cleanup)
-Core.guard.register("fishing", {
-	isEnabled = function()
-		return AF.enabled
-	end,
-	setEnabled = function(v)
-		AF.enabled = v
-	end,
-	progress = function()
-		local st = AF.stats
-		return st.casts + st.catches + st.escapes
-	end,
-	idleOk = function() -- no rod / GUI yet is waiting, not a freeze
-		return not AF.ready
-	end,
-	stallSec = 150,
-	restart = function(reason)
-		log("guard restart: %s", reason)
-		detach("guard: " .. reason)
-	end,
-})
 AF.stop = function()
 	if STATE.stop then
 		STATE.stop() -- runs cleanup() as well
