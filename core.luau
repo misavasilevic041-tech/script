@@ -12,10 +12,16 @@
 --   Core.panel{titleKey=, size=, pos=, onClose=}   draggable panel with lang / log / X buttons
 --   Core.newScope() / Core.launch(name, source)   scope = {connect, onCleanup, alive, stop}
 --   Core.unload()                 stops the running farm, saves, destroys the GUI
---   v1.1: Core.getRaw(name), Core.afterFarm(scope),
---   Core.guard.register(name, {isEnabled, setEnabled(on, reason), progress, idleOk, stallSec, restart(reason)})
---   Core.guard.cancel(name) (call on every manual ON/OFF click), Core.guard.unregister(name)
---   guard = autopause while the character is dead, restart after death, anti-freeze watchdog
+--   v1.1:
+--   Core.getGlobal(key, default) / Core.setGlobal(key, value)   hub-wide saved settings (autopause, watchdog)
+--   Core.paused()                 true while autopause is on and the window is unfocused or the Roblox menu is open
+--   Core.watchdog(scope, {name=, getProgress=fn->number, isActive=fn->bool, onStall=fn, minutes=})
+--                                 no progress for N minutes -> log + toast + onStall() (usually restarts the loop)
+--   Core.onRespawn(scope, fn)     fn(character) after every respawn (death, teleport)
+--   v1.2:
+--   Core.logLoad(name) / Core.logUnload(name)   the only start/stop lines in the log: "[LOAD] x" / "[UNLOAD] x"
+--   Core.confirm{titleKey=|title=, textKey=|text=, yesKey=|yes=, noKey=|no=, onYes=fn, onNo=fn}   modal window, fades in/out
+--   Core.panel: the X button now asks for confirmation before calling onClose
 
 local env = (getgenv and getgenv()) or _G
 local Players = game:GetService("Players")
@@ -28,7 +34,7 @@ if env.HubCore and env.HubCore.unload then
 	pcall(env.HubCore.unload)
 end
 
-local Core = { VERSION = "1.1", dead = false }
+local Core = { VERSION = "1.2", dead = false }
 env.HubCore = Core
 
 local function copy(v)
@@ -65,12 +71,21 @@ function Core.logText()
 	return table.concat(logBuf, "\n")
 end
 
+-- the only start / stop lines: something was loaded or unloaded
+function Core.logLoad(name)
+	Core.log("LOAD", "%s", tostring(name))
+end
+
+function Core.logUnload(name)
+	Core.log("UNLOAD", "%s", tostring(name))
+end
+
 -- ============================================================
 -- Settings (saved to AutoFarmHub/settings.json)
 -- ============================================================
 local FOLDER, FILE = "AutoFarmHub", "AutoFarmHub/settings.json"
 local fsOk = type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
-local data = { lang = "ru", farms = {} }
+local data = { lang = "ru", farms = {}, global = {} }
 
 if fsOk then
 	local ok, raw = pcall(function()
@@ -88,6 +103,9 @@ if fsOk then
 			end
 			if type(dec.farms) == "table" then
 				data.farms = dec.farms
+			end
+			if type(dec.global) == "table" then
+				data.global = dec.global
 			end
 		else
 			Core.log("CORE", "settings file is broken, using defaults")
@@ -150,14 +168,22 @@ function Core.getFarm(name, defaults)
 	return out
 end
 
--- saved table as it is (no defaults, no type check): the farm validates the keys itself
-function Core.getRaw(name)
-	local saved = data.farms[name]
-	return type(saved) == "table" and copy(saved) or {}
-end
-
 function Core.setFarm(name, tbl)
 	data.farms[name] = copy(tbl)
+	Core.save()
+end
+
+-- hub-wide settings (autopause, watchdog); same file, own table
+function Core.getGlobal(key, default)
+	local v = data.global[key]
+	if v ~= nil and type(v) == type(default) then
+		return v
+	end
+	return default
+end
+
+function Core.setGlobal(key, value)
+	data.global[key] = value
 	Core.save()
 end
 
@@ -176,14 +202,18 @@ local DICT = {
 		log_file = "Буфер обмена недоступен, лог сохранён в файл: %s",
 		log_fail = "Не удалось скопировать лог",
 		lang_label = "язык",
-		guard_pause = "Автопауза: персонаж недоступен",
-		guard_resume = "Респавн: фарм продолжен",
-		guard_restart = "Респавн: фарм перезапущен",
-		guard_stall = "Фарм завис, перезапуск (%d из 3)",
-		guard_stop = "Фарм не двигается, остановлен",
-		guard_autopause = "автопауза",
-		guard_restart_opt = "перезапуск после смерти",
-		guard_watchdog = "защита от зависаний",
+		g_autopause = "автопауза",
+		g_watchdog = "защита от зависаний",
+		wd_stall = "%s: нет прогресса %d мин, перезапускаю цикл",
+		wd_warn = "%s: нет прогресса %d мин",
+		paused = "пауза (окно неактивно или открыто меню)",
+		confirm_title = "ВЫГРУЗКА",
+		confirm_text = "Будут выгружены хаб, ядро и все подключённые файлы (огород, рыбалка, добыча). Настройки сохранятся.",
+		confirm_yes = "Выгрузить",
+		confirm_no = "Отмена",
+		reload_title = "ПЕРЕЗАГРУЗКА",
+		reload_text = "Скрипт уже запущен. Перезагрузить? Текущая работа остановится, настройки сохранятся.",
+		reload_yes = "Перезагрузить",
 	},
 	en = {
 		v_on = "on",
@@ -195,14 +225,18 @@ local DICT = {
 		log_file = "Clipboard unavailable, log saved to file: %s",
 		log_fail = "Could not copy the log",
 		lang_label = "language",
-		guard_pause = "Autopause: character unavailable",
-		guard_resume = "Respawned: farm resumed",
-		guard_restart = "Respawned: farm restarted",
-		guard_stall = "Farm is stuck, restarting (%d of 3)",
-		guard_stop = "Farm is not moving, stopped",
-		guard_autopause = "autopause",
-		guard_restart_opt = "restart after death",
-		guard_watchdog = "anti-freeze watchdog",
+		g_autopause = "autopause",
+		g_watchdog = "stall protection",
+		wd_stall = "%s: no progress for %d min, restarting the loop",
+		wd_warn = "%s: no progress for %d min",
+		paused = "paused (window inactive or game menu open)",
+		confirm_title = "UNLOAD",
+		confirm_text = "The hub, the core and all connected files (garden, fishing, mining) will be unloaded. Settings are kept.",
+		confirm_yes = "Unload",
+		confirm_no = "Cancel",
+		reload_title = "RELOAD",
+		reload_text = "The script is already running. Reload it? Current work will stop, settings are kept.",
+		reload_yes = "Reload",
 	},
 }
 
@@ -405,6 +439,88 @@ function Core.toast(text, kind, seconds)
 end
 
 -- ============================================================
+-- Confirm window (v1.2): modal in the middle of the screen, fades in and out
+--   Core.confirm{ titleKey=|title=, textKey=|text=, yesKey=|yes=, noKey=|no=, onYes=fn, onNo=fn }
+-- ============================================================
+local modal
+local function pickText(o, name)
+	if o[name .. "Key"] then
+		return Core.t(o[name .. "Key"])
+	end
+	return tostring(o[name] or "")
+end
+
+function Core.confirm(o)
+	local g = Core.gui()
+	if not g then -- no GUI (core already unloaded): nothing to ask, just do it
+		if o.onYes then
+			task.spawn(o.onYes)
+		end
+		return
+	end
+	if modal and modal.Parent then
+		pcall(modal.Destroy, modal)
+	end
+	local dim = mk("TextButton", g, {
+		Name = "Confirm", Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(0, 0, 0),
+		BackgroundTransparency = 1, BorderSizePixel = 0, Text = "", AutoButtonColor = false, ZIndex = 50,
+	})
+	modal = dim -- the dim layer also swallows clicks, so nothing below can be pressed meanwhile
+	local box = mk("CanvasGroup", dim, {
+		Size = UDim2.fromOffset(300, 156), Position = UDim2.new(0.5, -150, 0.5, -78), BackgroundColor3 = C.BG,
+		BorderSizePixel = 0, GroupTransparency = 1,
+	})
+	ui.round(box, 10)
+	mk("UIStroke", box, { Color = C.ORANGE, Thickness = 1.5 })
+	ui.label(box, {
+		Position = UDim2.fromOffset(12, 10), Size = UDim2.new(1, -24, 0, 20), TextSize = 15,
+		Font = ui.FONT_BOLD, TextXAlignment = Enum.TextXAlignment.Left, Text = pickText(o, "title"),
+	})
+	ui.label(box, {
+		Position = UDim2.fromOffset(12, 36), Size = UDim2.new(1, -24, 0, 66), TextSize = 13, TextWrapped = true,
+		TextColor3 = C.GRAY, TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+		Text = pickText(o, "text"),
+	})
+	local yes = ui.button(box, {
+		Position = UDim2.fromOffset(12, 110), Size = UDim2.new(0.5, -18, 0, 34), TextSize = 14,
+		BackgroundColor3 = C.RED, Text = pickText(o, "yes"),
+	})
+	local no = ui.button(box, {
+		Position = UDim2.new(0.5, 6, 0, 110), Size = UDim2.new(0.5, -18, 0, 34), TextSize = 14,
+		Text = pickText(o, "no"),
+	})
+	local closed = false
+	local function close(cb)
+		if closed then
+			return
+		end
+		closed = true
+		pcall(function()
+			local ti = TweenInfo.new(0.12)
+			TweenService:Create(box, ti, { GroupTransparency = 1 }):Play()
+			TweenService:Create(dim, ti, { BackgroundTransparency = 1 }):Play()
+		end)
+		task.delay(0.15, function()
+			pcall(dim.Destroy, dim)
+		end)
+		if cb then
+			task.spawn(cb)
+		end
+	end
+	yes.Activated:Connect(function()
+		close(o.onYes)
+	end)
+	no.Activated:Connect(function()
+		close(o.onNo)
+	end)
+	pcall(function()
+		local ti = TweenInfo.new(0.15)
+		TweenService:Create(box, ti, { GroupTransparency = 0 }):Play()
+		TweenService:Create(dim, ti, { BackgroundTransparency = 0.5 }):Play()
+	end)
+end
+
+-- ============================================================
 -- Copy log
 -- ============================================================
 function Core.copyLog()
@@ -464,12 +580,78 @@ function Core.panel(opts)
 	langBtn.Activated:Connect(Core.nextLang)
 	logBtn.Activated:Connect(Core.copyLog)
 	if opts.onClose then
-		closeBtn.Activated:Connect(opts.onClose)
+		closeBtn.Activated:Connect(function()
+			Core.confirm({
+				titleKey = "confirm_title", textKey = "confirm_text", yesKey = "confirm_yes", noKey = "confirm_no",
+				onYes = opts.onClose,
+			})
+		end)
 	end
 	local body = mk("Frame", root, {
 		Position = UDim2.fromOffset(0, 30), Size = UDim2.new(1, 0, 1, -30), BackgroundTransparency = 1,
 	})
 	return { root = root, body = body, title = title, close = closeBtn }
+end
+
+-- ============================================================
+-- Autopause, watchdog, respawn (v1.1)
+-- ============================================================
+local UIS = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
+local focused = true
+UIS.WindowFocused:Connect(function()
+	focused = true
+end)
+UIS.WindowFocusReleased:Connect(function()
+	focused = false
+end)
+
+function Core.paused()
+	if not Core.getGlobal("autopause", false) then
+		return false
+	end
+	local menu = false
+	pcall(function()
+		menu = GuiService.MenuIsOpen
+	end)
+	return (not focused) or menu
+end
+
+function Core.watchdog(scope, o)
+	local name = o.name or "farm"
+	local lastProg, lastT, warned = nil, os.clock(), false
+	local alive = true
+	scope.onCleanup(function()
+		alive = false
+	end)
+	task.spawn(function()
+		while alive and scope.alive() and not Core.dead do
+			task.wait(5)
+			local now = os.clock()
+			local mins = o.minutes or Core.getGlobal("stallMin", 5)
+			local prog = o.getProgress and o.getProgress() or 0
+			local active = (not o.isActive) or o.isActive()
+			if not active or Core.paused() or not Core.getGlobal("watchdog", true) or prog ~= lastProg then
+				lastProg, lastT, warned = prog, now, false
+			elseif now - lastT >= mins * 60 then
+				Core.log("WD", "%s: no progress for %d min", name, mins)
+				if o.onStall then
+					Core.toast(Core.t("wd_stall", name, mins), "warn", 5)
+					pcall(o.onStall)
+				else
+					Core.toast(Core.t("wd_warn", name, mins), "warn", 5)
+				end
+				lastT = now
+			end
+		end
+	end)
+end
+
+function Core.onRespawn(scope, fn)
+	return scope.connect(P.CharacterAdded, function(ch)
+		Core.log("CORE", "respawn detected")
+		task.spawn(fn, ch)
+	end)
 end
 
 -- ============================================================
@@ -501,6 +683,9 @@ function Core.newScope()
 		for _, f in ipairs(s.fns) do
 			pcall(f)
 		end
+		if s.after then
+			pcall(s.after) -- Core.launch hangs the UNLOAD line here
+		end
 	end
 	return s
 end
@@ -512,6 +697,9 @@ function Core.launch(name, src)
 	end
 	local scope = Core.newScope()
 	Core.farmScope, Core.farmName = scope, name
+	scope.after = function()
+		Core.logUnload(name)
+	end
 	env.STATE = scope
 	pcall(function()
 		_G.STATE = scope
@@ -521,6 +709,7 @@ function Core.launch(name, src)
 		Core.log("CORE", "compile error in %s: %s", name, tostring(err))
 		return false, tostring(err)
 	end
+	Core.logLoad(name)
 	task.spawn(function()
 		local ok, e = pcall(fn)
 		if not ok then
@@ -530,133 +719,6 @@ function Core.launch(name, src)
 	end)
 	return true
 end
-
--- unload the shared module a moment after the farm is gone, unless another farm took its place
-function Core.afterFarm(scope)
-	task.delay(2.5, function()
-		if Core.farmScope == scope then
-			Core.unload()
-		end
-	end)
-end
-
--- ============================================================
--- Guard (v2): autopause, restart after death, anti-freeze watchdog
--- ============================================================
-local guard = { farms = {} }
-Core.guard = guard
-guard.cfg = Core.getFarm("guard", { autopause = true, restart = true, watchdog = true })
-
-function guard.save()
-	Core.setFarm("guard", guard.cfg)
-end
-
-function guard.register(name, f)
-	f.name, f.paused, f.dead, f.wasOn = name, false, false, false
-	f.prog, f.progT, f.restarts = nil, os.clock(), {}
-	f.stallSec = f.stallSec or 180
-	guard.farms[name] = f
-end
-
-function guard.unregister(name)
-	guard.farms[name] = nil
-end
-
--- the user clicked ON/OFF by hand: a pending autopause must not switch the farm back on
-function guard.cancel(name)
-	local f = guard.farms[name]
-	if f then
-		f.paused, f.dead = false, false
-	end
-end
-
-local function charOk()
-	local ch = P.Character
-	local hum = ch and ch:FindFirstChildOfClass("Humanoid")
-	local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
-	return hum ~= nil and hrp ~= nil and hum.Health > 0
-end
-
-local aliveSince
-local function guardStep(now)
-	local ok = charOk()
-	if ok then
-		aliveSince = aliveSince or now
-	else
-		aliveSince = nil
-	end
-	local settled = ok and aliveSince ~= nil and now - aliveSince >= 2
-	for name, f in pairs(guard.farms) do
-		local on = f.isEnabled()
-		if not ok then
-			if (on or f.paused) and not f.dead then
-				f.dead = true
-				Core.log("GUARD", "%s: character lost", name)
-				if on and guard.cfg.autopause then
-					f.paused = true
-					pcall(f.setEnabled, false, "autopause")
-					Core.toast(Core.t("guard_pause"), "warn")
-				end
-			end
-		elseif settled and f.dead then
-			f.dead = false
-			local wasPaused = f.paused
-			f.paused = false
-			if guard.cfg.restart and f.restart then
-				pcall(f.restart, "death")
-			end
-			if wasPaused then
-				pcall(f.setEnabled, true, "resume")
-			end
-			if wasPaused or on then
-				Core.log("GUARD", "%s: respawn handled (restart=%s)", name, tostring(guard.cfg.restart))
-				Core.toast(Core.t(guard.cfg.restart and "guard_restart" or "guard_resume"), "ok")
-			end
-			f.prog, f.progT = nil, now
-			on = f.isEnabled()
-		end
-
-		if not on then
-			f.wasOn = false
-		elseif settled and not f.paused then
-			local okp, p = pcall(f.progress)
-			if not f.wasOn or not okp then
-				f.wasOn, f.prog, f.progT, f.restarts = true, okp and p or nil, now, {}
-			elseif p ~= f.prog then
-				f.prog, f.progT = p, now
-			elseif f.idleOk and f.idleOk() then
-				f.progT = now
-			elseif guard.cfg.watchdog and now - f.progT >= f.stallSec then
-				f.progT = now
-				local r = f.restarts
-				for i = #r, 1, -1 do
-					if now - r[i] > 600 then
-						table.remove(r, i)
-					end
-				end
-				if #r >= 3 then
-					Core.log("GUARD", "%s: no progress after 3 restarts, stopping", name)
-					pcall(f.setEnabled, false, "watchdog")
-					Core.toast(Core.t("guard_stop"), "err", 6)
-				else
-					r[#r + 1] = now
-					Core.log("GUARD", "%s: no progress for %ds, restart %d of 3", name, f.stallSec, #r)
-					if f.restart then
-						pcall(f.restart, "stall")
-					end
-					Core.toast(Core.t("guard_stall", #r), "warn", 4)
-				end
-			end
-		end
-	end
-end
-
-task.spawn(function()
-	while not Core.dead do
-		pcall(guardStep, os.clock())
-		task.wait(1)
-	end
-end)
 
 -- ============================================================
 -- Unload
@@ -670,6 +732,7 @@ function Core.unload()
 		pcall(Core.farmScope.stop)
 	end
 	Core.save(true)
+	Core.logUnload("hub")
 	pcall(function()
 		if sg then
 			sg:Destroy()
@@ -680,5 +743,5 @@ function Core.unload()
 	end
 end
 
-Core.log("CORE", "core v%s loaded, language=%s, settings file %s", Core.VERSION, data.lang, fsOk and "available" or "unavailable")
+Core.logLoad("core " .. Core.VERSION)
 return Core
