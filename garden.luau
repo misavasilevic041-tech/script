@@ -215,7 +215,7 @@ if not table.find(MODES, AF.mode) then
     AF.mode = "auto"
 end
 if AF.trace == nil then
-    AF.trace = true
+    AF.trace = false
 end
 if AF.stallWarn == nil then
     AF.stallWarn = 300
