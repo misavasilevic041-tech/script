@@ -16,6 +16,12 @@
 -- v1 (hub): runs under the hub. STATE comes from Core.launch, the log goes to Core.log (copy-log button),
 -- settings are saved through Core.getFarm / Core.setFarm, all GUI texts are translated. Fishing logic untouched.
 --   AF.stats, AF.trace (last 900 log lines), AF.state, AF.ready, AF.status
+--
+-- v3 (hub v3.2): the buff (cooking) is a core feature now, this file only gives way to it: while Core.buffBusy() is true
+-- the rod is not swapped back and no new cast starts, and Core.buffSafe tells the buff when the tools may be swapped.
+-- Unloading from the farm no longer takes the hub down by itself (the farm can be left for the hub): only the X button
+-- of this panel unloads everything. Housekeeping checks (rod scan, remote binding, GUI refresh) now run only in the
+-- game's pauses (no cast in progress); between throw and catch only the critical state checks run.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -46,7 +52,7 @@ Core.addStrings({
 		af_sellmax = "макс. за раз",
 		af_keep = "оставлять %s",
 		af_unload_title = "ВЫГРУЗКА СКРИПТА",
-		af_unload_text = "Остановит работу и уберёт меню",
+		af_unload_text = "Остановит работу и выгрузит хаб",
 		af_cancel = "Отмена",
 		af_toast_on = "Рыбалка включена",
 		af_toast_off = "Рыбалка выключена",
@@ -71,7 +77,7 @@ Core.addStrings({
 		af_sellmax = "sell max",
 		af_keep = "keep %s",
 		af_unload_title = "UNLOAD SCRIPT",
-		af_unload_text = "Stops all work and destroys the menu",
+		af_unload_text = "Stops all work and unloads the hub",
 		af_cancel = "Cancel",
 		af_toast_on = "Fishing enabled",
 		af_toast_off = "Fishing disabled",
@@ -401,8 +407,12 @@ local function findRod() -- equipped first, then the backpack
 end
 
 -- keep the rod in hand, otherwise the game refuses to cast
+local function buffBusy()
+	return Core.buffBusy and Core.buffBusy()
+end
+
 local function equipRod(now)
-	if now - lastEquip < 0.5 or not rodTool or rodTool.Parent == P.Character then
+	if now - lastEquip < 0.5 or not rodTool or rodTool.Parent == P.Character or buffBusy() then
 		return
 	end
 	lastEquip = now
@@ -888,16 +898,22 @@ local function onStateChange(st, now)
 	end
 end
 
+local CALM = { None = true, Catch = true, CaughtHold = true } -- states in which nothing time-critical is going on
+
 local function tick()
 	local now = os.clock()
-	AF.refreshUI()
-	if now - lastRodScan > 0.3 then
-		lastRodScan = now
-		rodTool = findRod()
-	end
-	if now - lastBind > 1 then
-		lastBind = now
-		bindRemote()
+	-- housekeeping only in the game's pauses (nothing detached, or between catches); during throw / bite / fight
+	-- only the critical state checks below run
+	if not attached or CALM[AF.state] then
+		AF.refreshUI()
+		if now - lastRodScan > 0.5 then
+			lastRodScan = now
+			rodTool = findRod()
+		end
+		if now - lastBind > 2 then
+			lastBind = now
+			bindRemote()
+		end
 	end
 
 	-- rod / GUI lifecycle: pause without a rod, re-attach when the game rebuilt its GUI
@@ -949,7 +965,7 @@ local function tick()
 			task.spawn(runMaint)
 		elseif not selling and not maint and not castBtn.Visible then
 			dismissOk(now, st) -- cannot cast: most likely the OK button is still up
-		elseif not selling and not maint and castBtn.Visible and castBtn.Text == "CAST" then
+		elseif not selling and not maint and not buffBusy() and castBtn.Visible and castBtn.Text == "CAST" then
 			local lo, hi = 0, 0
 			if AF.pauses then
 				lo, hi = 0.3, 1.5
@@ -1212,6 +1228,11 @@ local function buildGui()
 			end
 			if unloadId == my then
 				AF.stop()
+				task.delay(2.5, function() -- X means: everything goes, the hub and the core too
+					if Core.unload then
+						Core.unload()
+					end
+				end)
 			end
 		end)
 	end)
@@ -1262,6 +1283,12 @@ local function buildGui()
 	return sg
 end
 
+-- the buff may swap the tools only between catches: nothing pending, the rod in hand, the cast button ready
+Core.buffSafe = function()
+	return attached and AF.state == "None" and not selling and not maint and not sellPending and not maintPending
+		and rodTool ~= nil and rodTool.Parent == P.Character and castBtn ~= nil and castBtn.Visible
+end
+
 local sg = buildGui()
 local tickConn = STATE.connect(RunService.Heartbeat, safeTick)
 
@@ -1295,11 +1322,6 @@ local function cleanup()
 	log("unloaded")
 	Core.toast(T("af_toast_unload"), "info", 2)
 	getgenv().AF = nil
-	task.delay(2.5, function() -- nothing else needs the shared module once the only farm is gone
-		if Core.unload then
-			Core.unload()
-		end
-	end)
 end
 STATE.onCleanup(cleanup)
 AF.stop = function()
