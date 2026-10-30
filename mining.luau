@@ -1,4 +1,14 @@
---[[ Material Farm v5.1 (hub)
+--[[ ============================================================
+ AutoFarm Hub · mining.luau · v5.4   (@version 5.4)
+ Part of the AutoFarm Hub project: hub.luau (the only file the user runs), core.luau (shared module),
+ garden.luau, fishing.luau, mining.luau (farms), versions.json, lang.luau (optional extra languages).
+ Started by the hub (never run it on its own): it takes everything from getgenv().HubCore.
+ Farm: Mining (stones, trees, weeds). Hooks for the unified panel: Core.farmHooks (see core.luau). See README.md.
+============================================================ ]]
+--[[ Material Farm v5.4 (hub 4)
+	v5.4 (hub v4, cosmetics only, mining logic untouched): unified panel hooks (ON/OFF, speed, settings, counters) for the dock of the core,
+	remembered panel position, themes (colours come from ui.C).
+
 	Логика без таймеров респавна:
 	  есть ProximityPrompt внутри группы ресурса  -> ресурс жив, можно добывать
 	  нет ProximityPrompt                         -> добыт (или не прогружен): заглядываем телепортом
@@ -481,6 +491,7 @@ end
 local langOffs, unloaded = {}, false
 local panel = Core.panel({
 	titleKey = "m_title",
+	posKey = "mining",
 	size = Vector2.new(240, 96),
 	pos = UDim2.new(1, -260, 0.5, -48),
 	onClose = function()
@@ -551,6 +562,7 @@ local function addToggle(key, get, set)
 	end))
 end
 
+local stepRefresh = {}
 local function addStepper(key, cfgKey, step, lo, hi, fmt)
 	local row = ui.mk("Frame", menu, { Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, LayoutOrder = nextOrder() })
 	local l = ui.label(row, {
@@ -563,6 +575,7 @@ local function addStepper(key, cfgKey, step, lo, hi, fmt)
 	})
 	local plus = ui.button(row, { Size = UDim2.new(0, 24, 1, 0), Position = UDim2.new(1, -26, 0, 0), TextSize = 16, Text = "+" })
 	local function refresh() val.Text = string.format(fmt, CFG[cfgKey]) end
+	stepRefresh[cfgKey] = refresh
 	local function bump(dir)
 		local v = math.floor((CFG[cfgKey] + dir * step) / step + 0.5) * step
 		CFG[cfgKey] = math.clamp(v, lo, hi)
@@ -606,6 +619,30 @@ local function setRunning(on)
 	log("running =", tostring(running))
 end
 track(btn.Activated:Connect(function() setRunning(not running) end))
+
+-- ===== v5.4: hooks for the unified panel (dock) of the core =====
+local SPEEDS = { 0.05, 0.1, 0.2, 0.4, 0.8 } -- hit delay presets, seconds
+Core.farmHooks = {
+	isOn = function() return running end,
+	toggle = function() setRunning(not running) end,
+	settings = function()
+		menu.Visible = not menu.Visible
+		gear.BackgroundColor3 = menu.Visible and C.GREEN or C.BTN
+	end,
+	speed = {
+		label = function() return string.format("%.2fs", CFG.HitDelay) end,
+		next = function()
+			local best, bi = math.huge, 1
+			for i, v in ipairs(SPEEDS) do
+				if math.abs(v - CFG.HitDelay) < best then best, bi = math.abs(v - CFG.HitDelay), i end
+			end
+			CFG.HitDelay = SPEEDS[bi % #SPEEDS + 1]
+			if stepRefresh.HitDelay then stepRefresh.HitDelay() end
+			saveCfg()
+		end,
+	},
+	stats = function() return { count = mined, unitKey = "u_mined" } end,
+}
 
 -- ===== v2: защита от зависаний и респавн =====
 if STATE then
