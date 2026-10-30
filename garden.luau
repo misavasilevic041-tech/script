@@ -1,3 +1,12 @@
+--[[ ============================================================
+ AutoFarm Hub · garden.luau · v5.1   (@version 5.1)
+ Part of the AutoFarm Hub project: hub.luau (the only file the user runs), core.luau (shared module),
+ garden.luau, fishing.luau, mining.luau (farms), versions.json, lang.luau (optional extra languages).
+ Started by the hub (never run it on its own): it takes everything from getgenv().HubCore.
+ Farm: Garden (plant, water, harvest, sell). Hooks for the unified panel: Core.farmHooks (see core.luau). See README.md.
+============================================================ ]]
+-- v5.1 (hub v4, cosmetics only, farm logic untouched): unified panel hooks (ON/OFF, speed, settings, counters) for the dock of the core,
+-- remembered window position, themes (colours come from Core.ui.C), the GUI joins the hide / show hotkey.
 -- v5.0 (hub v3): no start/stop log lines of its own (the core writes [LOAD]/[UNLOAD]), the X button asks first.
 -- AutoFarm v4.9 (hub build): v4.8.1 under the hub, farm logic untouched. Core log / language RU-EN / saved settings /
 -- toasts / autopause (the hub-wide switch). Base: v4.8 + TEMPORARY cycle diagnostics (stat line: cycle / grow / eff). Farm logic untouched.
@@ -1666,15 +1675,17 @@ local function new(class, props, parent)
     return o
 end
 
-local WHITE, GRAY, BTN, BG = Color3.fromRGB(235, 235, 240), Color3.fromRGB(140, 140, 150), Color3.fromRGB(48, 48, 58), Color3.fromRGB(26, 26, 32)
-local GREEN, RED = Color3.fromRGB(46, 160, 67), Color3.fromRGB(170, 50, 50)
-local ACTIVE, HOT = Color3.fromRGB(40, 110, 200), Color3.fromRGB(215, 110, 30)
+local Cc = Core.ui.C -- theme colours (changed in place by the core)
+local WHITE, GRAY, BTN, BG = Cc.WHITE, Cc.GRAY, Cc.BTN, Cc.BG
+local GREEN, RED = Cc.GREEN, Cc.RED
+local ACTIVE, HOT = Cc.BLUE, Cc.ORANGE
 
 local gui = new("ScreenGui", { Name = "AFarmGUI", ResetOnSpawn = false }, lp:WaitForChild("PlayerGui"))
 local root = new("Frame", {
     Size = UDim2.fromOffset(200, 158), Position = UDim2.new(0, 20, 0.5, -79),
     BackgroundColor3 = BG, BorderSizePixel = 0, Active = true, Draggable = true,
 }, gui)
+Core.rememberPos(root, "garden")
 new("UICorner", { CornerRadius = UDim.new(0, 8) }, root)
 
 local function button(parent, props)
@@ -1853,10 +1864,10 @@ end
 
 local function refresh()
     for m, b in pairs(modeBtns) do
-        b.BackgroundColor3 = (m == AF.mode) and (m == "fastest" and HOT or ACTIVE) or BTN
+        b.BackgroundColor3 = (m == AF.mode) and (m == "fastest" and Cc.ORANGE or Cc.BLUE) or Cc.BTN
     end
     menu.Visible = AF.mode == "custom"
-    toggle.BackgroundColor3 = AF.enabled and GREEN or RED
+    toggle.BackgroundColor3 = AF.enabled and Cc.GREEN or Cc.RED
     if not AF.enabled then
         toggle.Text = T("v_off"):upper()
     end
@@ -1904,7 +1915,7 @@ local function onClick(btn, fn)
         saveCfg()
     end)
 end
-onClick(toggle, function()
+local function doToggle()
     AF.enabled = not AF.enabled
     if AF.enabled then
         S.coins0, S.active, S.actionsTotal, S.retriesTotal = coins(), 0, 0, 0
@@ -1915,7 +1926,8 @@ onClick(toggle, function()
     end
     toggle.Text = AF.enabled and (T("v_on"):upper() .. '\n<font size="11">' .. statusLine() .. "</font>") or T("v_off"):upper()
     Core.toast(T(AF.enabled and "g_on" or "g_off"), AF.enabled and "ok" or "info", 2)
-end)
+end
+onClick(toggle, doToggle)
 for m, b in pairs(modeBtns) do
     onClick(b, function()
         setMode(m)
@@ -1975,6 +1987,43 @@ langOffs[#langOffs + 1] = Core.onLang(function()
     end
 end)
 refresh()
+
+-- ========== v5.1: hooks for the unified panel (dock) of the core ==========
+Core.registerGui(gui)
+do
+    local SPEED_MODES = { "auto", "slow", "medium", "fast", "fastest" }
+    local prevMode = "auto"
+    Core.farmHooks = {
+        isOn = function() return AF.enabled end,
+        toggle = function()
+            doToggle()
+            refresh()
+            saveCfg()
+        end,
+        settings = function() -- the custom menu of the farm opens in CUSTOM mode; the second press goes back
+            if AF.mode == "custom" then
+                setMode(prevMode)
+            else
+                prevMode = AF.mode
+                setMode("custom")
+            end
+            refresh()
+            saveCfg()
+        end,
+        speed = {
+            label = function() return MODE_LABEL[AF.mode] or AF.mode end,
+            next = function()
+                local i = table.find(SPEED_MODES, AF.mode) or 0
+                setMode(SPEED_MODES[i % #SPEED_MODES + 1])
+                refresh()
+                saveCfg()
+            end,
+        },
+        stats = function()
+            return { count = S.harvested - SES.h0, coins = coins() - S.coins0, unitKey = "u_harvest" }
+        end,
+    }
+end
 
 -- ========== threads ==========
 -- status line (2 Hz); when the farm is off it refreshes the soil counters itself
