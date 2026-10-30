@@ -1,11 +1,9 @@
--- AutoFarm Hub v3.1
--- v3.1: modules. Settings -> "Modules": system on/off + list of module files (at least one selected while on).
--- With the system on, every started farm also loads the selected modules (nested scope inside the farm).
--- A module that fails to download only gives a toast + log line, the farm keeps running.
--- v3: no start-up log lines (only "[LOAD] x" / "[UNLOAD] x"), a confirm window before every unload, and running the hub
--- again asks "reload?" instead of silently resetting. Rod / bait / food features of fishing come after the game scan.
--- Menu: [Autofarm] [Settings]. Autofarm opens a side list of 3 farms; after the choice the hub removes
--- its own menu and loads the chosen farm script. v2: garden, fishing and mining are all connected.
+-- AutoFarm Hub v3.2
+-- v3.2: the module system is gone. Buff (cooking) and languages live in the core and work for all three farms.
+-- Every started farm gets a small dock window with a [Hub] button: it opens this menu again WITHOUT stopping the farm.
+-- Picking a farm while another one runs asks first (the running farm is stopped). Running the hub again asks "reload?".
+-- Menu: [Autofarm] [Settings]. Autofarm opens a side list of 3 farms; after the choice the hub removes its own menu
+-- and loads the chosen farm script. Settings: language, copy log, autopause, stall protection, unload.
 --
 -- Run this file only:
 --   loadstring(game:HttpGet("https://raw.githubusercontent.com/YOURNAME/YOURREPO/main/hub.luau"))()
@@ -14,11 +12,6 @@
 -- is read with readfile).
 
 local BASE = "https://raw.githubusercontent.com/misavasilevic041-tech/script/refs/heads/main/"
-
--- module files (add-ons of a farm); file names are placeholders until the real files exist
-local MODULES = {
-	{ key = "buff", file = "buff.luau", titleKey = "mod_buff" },
-}
 
 local FILES = {
 	core = "core.luau",
@@ -76,19 +69,15 @@ local function main()
 			farm_garden = "Огород",
 			farm_fishing = "Рыбалка",
 			farm_mining = "Добыча",
-			farm_soon = "скоро, v2",
-			hub_soon_toast = "Этот фарм подключим в v2",
 			hub_unload = "выгрузить хаб",
-			hub_global = "Общие настройки",
 			hub_loading = "Загружаю: %s…",
 			hub_net_err = "Не удалось скачать %s",
 			hub_start_err = "Ошибка запуска: %s",
 			hub_ready = "Хаб готов",
-			mod_title = "Модули",
-			mod_system = "Система модулей",
-			mod_buff = "Бафф (готовка)",
-			mod_min_one = "Нужен минимум один модуль",
-			mod_load_err = "Модуль %s не скачался, фарм работает без него",
+			hub_already = "Этот фарм уже запущен",
+			switch_title = "СМЕНА ФАРМА",
+			switch_text = "Сейчас работает «%s». При запуске «%s» он остановится.",
+			switch_yes = "Сменить",
 		},
 		en = {
 			hub_title = "AutoFarm Hub",
@@ -98,23 +87,29 @@ local function main()
 			farm_garden = "Garden",
 			farm_fishing = "Fishing",
 			farm_mining = "Mining",
-			farm_soon = "soon, v2",
-			hub_soon_toast = "This farm comes in v2",
 			hub_unload = "unload hub",
-			hub_global = "Global settings",
 			hub_loading = "Loading: %s…",
 			hub_net_err = "Could not download %s",
 			hub_start_err = "Start error: %s",
 			hub_ready = "Hub ready",
-			mod_title = "Modules",
-			mod_system = "Module system",
-			mod_buff = "Buff (cooking)",
-			mod_min_one = "At least one module is required",
-			mod_load_err = "Module %s failed to download, the farm runs without it",
+			hub_already = "This farm is already running",
+			switch_title = "SWITCH FARM",
+			switch_text = "\"%s\" is running now. Starting \"%s\" will stop it.",
+			switch_yes = "Switch",
 		},
 	})
 
-	-- ===== Menu =====
+	local farmList = {
+		{ "garden", "farm_garden" },
+		{ "fishing", "farm_fishing" },
+		{ "mining", "farm_mining" },
+	}
+	local titleOf = {}
+	for _, f in ipairs(farmList) do
+		titleOf[f[1]] = f[2]
+	end
+
+	-- ===== Starting a farm =====
 	local panel
 	local function closeHub()
 		if panel then
@@ -125,99 +120,8 @@ local function main()
 		end
 	end
 
-	local sides = {}
-	local function showSide(which)
-		for name, f in pairs(sides) do
-			f.Visible = (name == which) and not f.Visible
-		end
-	end
-
-	panel = Core.panel({
-		titleKey = "hub_title",
-		size = Vector2.new(210, 128),
-		onClose = function()
-			Core.unload()
-		end,
-	})
-	local body = panel.body
-
-	local function mainButton(y, key, fn)
-		local b = ui.button(body, {
-			Position = UDim2.fromOffset(8, y), Size = UDim2.new(1, -16, 0, 40), TextSize = 16,
-		})
-		Core.bindText(b, key)
-		b.Activated:Connect(fn)
-		return b
-	end
-
-	local function sideFrame(height)
-		local f = ui.mk("Frame", panel.root, {
-			Position = UDim2.new(1, 6, 0, 0), Size = UDim2.fromOffset(190, height), BackgroundColor3 = C.BG,
-			BorderSizePixel = 0, Visible = false,
-		})
-		ui.round(f, 8)
-		return f
-	end
-
-	-- farm choice (side panel)
-	local farmSide = sideFrame(168)
-	sides.farms = farmSide
-	local hdr = ui.label(farmSide, {
-		Position = UDim2.fromOffset(10, 6), Size = UDim2.new(1, -20, 0, 18), TextColor3 = C.GRAY,
-		Font = ui.FONT_BOLD, TextXAlignment = Enum.TextXAlignment.Left,
-	})
-	Core.bindText(hdr, "hub_choose")
-
-	-- modules: saved state (global settings), selected keys as a set
-	local function modOn()
-		return Core.getGlobal("modulesOn", false)
-	end
-	local function modSet()
-		local set = {}
-		for _, k in ipairs(Core.getGlobal("modList", {})) do
-			set[k] = true
-		end
-		return set
-	end
-	local function modSave(set)
-		local arr = {}
-		for _, m in ipairs(MODULES) do
-			if set[m.key] then
-				arr[#arr + 1] = m.key
-			end
-		end
-		Core.setGlobal("modList", arr)
-	end
-
-	local function startModules()
-		if not modOn() then
-			return
-		end
-		local set = modSet()
-		for _, m in ipairs(MODULES) do
-			if set[m.key] then
-				task.spawn(function()
-					local src, err = fetch(m.file)
-					if not src then
-						Core.log("HUB", "download failed %s: %s", m.file, tostring(err))
-						Core.toast(T("mod_load_err", m.file), "err", 5)
-						return
-					end
-					local ok, e = Core.launchModule(m.key, src)
-					if not ok then
-						Core.toast(T("hub_start_err", tostring(e)), "err", 6)
-					end
-				end)
-			end
-		end
-	end
-
-	local function startFarm(key, titleKey)
+	local function doStart(key, titleKey)
 		local file = FILES[key]
-		if not file then
-			Core.toast(T("hub_soon_toast"), "warn")
-			return
-		end
 		local name = T(titleKey)
 		Core.toast(T("hub_loading", name), "info", 2)
 		task.spawn(function()
@@ -231,165 +135,157 @@ local function main()
 			local ok, e = Core.launch(key, src)
 			if not ok then
 				Core.toast(T("hub_start_err", tostring(e)), "err", 6)
-			else
-				startModules()
 			end
 		end)
 	end
 
-	local farmList = {
-		{ "garden", "farm_garden" },
-		{ "fishing", "farm_fishing" },
-		{ "mining", "farm_mining" },
-	}
-	for i, f in ipairs(farmList) do
-		local key, titleKey = f[1], f[2]
-		local available = FILES[key] ~= nil
-		local b = ui.button(farmSide, {
-			Position = UDim2.fromOffset(8, 28 + (i - 1) * 44), Size = UDim2.new(1, -16, 0, 38), TextSize = 14,
-			BackgroundColor3 = available and C.GREEN or C.BTN, TextColor3 = available and C.WHITE or C.GRAY,
-			RichText = true,
+	local function startFarm(key, titleKey)
+		local cur = Core.farmScope
+		if cur and not cur.dead then
+			if Core.farmName == key then
+				Core.toast(T("hub_already"), "info", 2)
+				return
+			end
+			Core.confirm({
+				titleKey = "switch_title",
+				text = T("switch_text", T(titleOf[Core.farmName] or tostring(Core.farmName)), T(titleKey)),
+				yesKey = "switch_yes", noKey = "confirm_no",
+				onYes = function()
+					doStart(key, titleKey)
+				end,
+			})
+			return
+		end
+		doStart(key, titleKey)
+	end
+
+	-- ===== Menu =====
+	local function buildHub()
+		local sides = {}
+		local function showSide(which)
+			for name, f in pairs(sides) do
+				f.Visible = (name == which) and not f.Visible
+			end
+		end
+
+		panel = Core.panel({
+			titleKey = "hub_title",
+			size = Vector2.new(210, 128),
+			pos = UDim2.new(0.5, -105, 0.5, -64),
+			onClose = function()
+				Core.unload()
+			end,
 		})
-		if available then
+		local body = panel.body
+
+		local function mainButton(y, key, fn)
+			local b = ui.button(body, {
+				Position = UDim2.fromOffset(8, y), Size = UDim2.new(1, -16, 0, 40), TextSize = 16,
+			})
+			Core.bindText(b, key)
+			b.Activated:Connect(fn)
+			return b
+		end
+
+		local function sideFrame(height)
+			local f = ui.mk("Frame", panel.root, {
+				Position = UDim2.new(1, 6, 0, 0), Size = UDim2.fromOffset(190, height), BackgroundColor3 = C.BG,
+				BorderSizePixel = 0, Visible = false,
+			})
+			ui.round(f, 8)
+			return f
+		end
+
+		-- farm choice (side panel)
+		local farmSide = sideFrame(168)
+		sides.farms = farmSide
+		local hdr = ui.label(farmSide, {
+			Position = UDim2.fromOffset(10, 6), Size = UDim2.new(1, -20, 0, 18), TextColor3 = C.GRAY,
+			Font = ui.FONT_BOLD, TextXAlignment = Enum.TextXAlignment.Left,
+		})
+		Core.bindText(hdr, "hub_choose")
+		for i, f in ipairs(farmList) do
+			local key, titleKey = f[1], f[2]
+			local b = ui.button(farmSide, {
+				Position = UDim2.fromOffset(8, 28 + (i - 1) * 44), Size = UDim2.new(1, -16, 0, 38), TextSize = 14,
+				BackgroundColor3 = C.GREEN,
+			})
 			Core.bindText(b, titleKey)
-		else
-			-- name + small "soon" note, kept translated
+			b.Activated:Connect(function()
+				startFarm(key, titleKey)
+			end)
+		end
+
+		-- settings (side panel): language, copy log, global toggles, unload hub
+		local setSide = sideFrame(214)
+		sides.settings = setSide
+		local langBtn = ui.button(setSide, {
+			Position = UDim2.fromOffset(8, 8), Size = UDim2.new(1, -16, 0, 34), TextSize = 14, Font = ui.FONT,
+		})
+		local function updLang()
+			langBtn.Text = T("lang_label") .. ": " .. Core.getLang():upper()
+		end
+		updLang()
+		Core.onLang(updLang)
+		langBtn.Activated:Connect(Core.nextLang)
+
+		local copyBtn = ui.button(setSide, {
+			Position = UDim2.fromOffset(8, 48), Size = UDim2.new(1, -16, 0, 34), TextSize = 14, Font = ui.FONT,
+		})
+		Core.bindText(copyBtn, "log_copy")
+		copyBtn.Activated:Connect(Core.copyLog)
+
+		-- global toggles (saved in the settings file, read by the farms through Core)
+		local function globalToggle(y, key, default, labelKey)
+			local b = ui.button(setSide, {
+				Position = UDim2.fromOffset(8, y), Size = UDim2.new(1, -16, 0, 34), TextSize = 13, Font = ui.FONT,
+			})
 			local function upd()
-				b.Text = T(titleKey) .. '\n<font size="11">' .. T("farm_soon") .. "</font>"
+				local on = Core.getGlobal(key, default)
+				b.Text = T(labelKey) .. ": " .. T(on and "v_on" or "v_off")
+				b.BackgroundColor3 = on and C.GREEN or C.BTN
 			end
 			upd()
 			Core.onLang(upd)
+			b.Activated:Connect(function()
+				Core.setGlobal(key, not Core.getGlobal(key, default))
+				upd()
+			end)
 		end
-		b.Activated:Connect(function()
-			startFarm(key, titleKey)
+		globalToggle(88, "autopause", false, "g_autopause")
+		globalToggle(128, "watchdog", true, "g_watchdog")
+
+		local unloadBtn = ui.button(setSide, {
+			Position = UDim2.fromOffset(8, 172), Size = UDim2.new(1, -16, 0, 30), TextSize = 13, Font = ui.FONT,
+			BackgroundColor3 = C.RED,
+		})
+		Core.bindText(unloadBtn, "hub_unload")
+		unloadBtn.Activated:Connect(function()
+			Core.confirm({
+				titleKey = "confirm_title", textKey = "confirm_text", yesKey = "confirm_yes", noKey = "confirm_no",
+				onYes = Core.unload,
+			})
+		end)
+
+		mainButton(6, "hub_autofarm", function()
+			showSide("farms")
+		end)
+		mainButton(52, "hub_settings", function()
+			showSide("settings")
 		end)
 	end
 
-	-- settings (side panel): language, copy log, unload hub
-	local setSide = sideFrame(254)
-	sides.settings = setSide
-	local langBtn = ui.button(setSide, {
-		Position = UDim2.fromOffset(8, 8), Size = UDim2.new(1, -16, 0, 34), TextSize = 14, Font = ui.FONT,
-	})
-	local function updLang()
-		langBtn.Text = T("lang_label") .. ": " .. Core.getLang():upper()
-	end
-	updLang()
-	Core.onLang(updLang)
-	langBtn.Activated:Connect(Core.nextLang)
-
-	local copyBtn = ui.button(setSide, {
-		Position = UDim2.fromOffset(8, 48), Size = UDim2.new(1, -16, 0, 34), TextSize = 14, Font = ui.FONT,
-	})
-	Core.bindText(copyBtn, "log_copy")
-	copyBtn.Activated:Connect(Core.copyLog)
-
-	-- global toggles (saved in the settings file, read by the farms through Core)
-	local function globalToggle(y, key, default, labelKey)
-		local b = ui.button(setSide, {
-			Position = UDim2.fromOffset(8, y), Size = UDim2.new(1, -16, 0, 34), TextSize = 13, Font = ui.FONT,
-		})
-		local function upd()
-			local on = Core.getGlobal(key, default)
-			b.Text = T(labelKey) .. ": " .. T(on and "v_on" or "v_off")
-			b.BackgroundColor3 = on and C.GREEN or C.BTN
-		end
-		upd()
-		Core.onLang(upd)
-		b.Activated:Connect(function()
-			Core.setGlobal(key, not Core.getGlobal(key, default))
-			upd()
-		end)
-	end
-	globalToggle(88, "autopause", false, "g_autopause")
-	globalToggle(128, "watchdog", true, "g_watchdog")
-
-	-- modules window: opens to the right of the settings window
-	local modSide = ui.mk("Frame", setSide, {
-		Position = UDim2.new(1, 6, 0, 0), Size = UDim2.fromOffset(190, 52 + #MODULES * 40),
-		BackgroundColor3 = C.BG, BorderSizePixel = 0, Visible = false,
-	})
-	ui.round(modSide, 8)
-	local sysBtn = ui.button(modSide, {
-		Position = UDim2.fromOffset(8, 8), Size = UDim2.new(1, -16, 0, 34), TextSize = 13, Font = ui.FONT,
-	})
-	local rows = {}
-	local function updMods()
-		local on, set = modOn(), modSet()
-		sysBtn.Text = T("mod_system") .. ": " .. T(on and "v_on" or "v_off")
-		sysBtn.BackgroundColor3 = on and C.GREEN or C.BTN
-		for _, r in ipairs(rows) do
-			local sel = set[r.key] == true
-			r.btn.Text = (sel and "[x] " or "[ ] ") .. T(r.titleKey)
-			r.btn.BackgroundColor3 = (sel and on) and C.GREEN or C.BTN
-			r.btn.TextColor3 = on and C.WHITE or C.GRAY
+	-- the [Hub] button of the dock window: open / close the menu, the running farm is not touched
+	Core.toggleHub = function()
+		if panel and panel.root.Parent then
+			closeHub()
+		else
+			buildHub()
 		end
 	end
-	sysBtn.Activated:Connect(function()
-		local on, set = modOn(), modSet()
-		if not on and next(set) == nil and MODULES[1] then
-			set[MODULES[1].key] = true -- turning on with nothing selected: take the first one
-			modSave(set)
-		end
-		Core.setGlobal("modulesOn", not on)
-		updMods()
-	end)
-	for i, m in ipairs(MODULES) do
-		local b = ui.button(modSide, {
-			Position = UDim2.fromOffset(8, 48 + (i - 1) * 40), Size = UDim2.new(1, -16, 0, 34), TextSize = 13,
-			Font = ui.FONT,
-		})
-		rows[#rows + 1] = { key = m.key, titleKey = m.titleKey, btn = b }
-		b.Activated:Connect(function()
-			local set = modSet()
-			if set[m.key] then
-				local n = 0
-				for _ in pairs(set) do
-					n = n + 1
-				end
-				if modOn() and n <= 1 then
-					Core.toast(T("mod_min_one"), "warn", 2)
-					return
-				end
-				set[m.key] = nil
-			else
-				set[m.key] = true
-			end
-			modSave(set)
-			updMods()
-		end)
-	end
-	updMods()
-	Core.onLang(updMods)
 
-	local modBtn = ui.button(setSide, {
-		Position = UDim2.fromOffset(8, 172), Size = UDim2.new(1, -16, 0, 34), TextSize = 14, Font = ui.FONT,
-	})
-	Core.bindText(modBtn, "mod_title")
-	modBtn.Activated:Connect(function()
-		modSide.Visible = not modSide.Visible
-	end)
-
-	local unloadBtn = ui.button(setSide, {
-		Position = UDim2.fromOffset(8, 212), Size = UDim2.new(1, -16, 0, 30), TextSize = 13, Font = ui.FONT,
-		BackgroundColor3 = C.RED,
-	})
-	Core.bindText(unloadBtn, "hub_unload")
-	unloadBtn.Activated:Connect(function()
-		Core.confirm({
-			titleKey = "confirm_title", textKey = "confirm_text", yesKey = "confirm_yes", noKey = "confirm_no",
-			onYes = Core.unload,
-		})
-	end)
-
-	mainButton(6, "hub_autofarm", function()
-		showSide("farms")
-	end)
-	mainButton(52, "hub_settings", function()
-		showSide("settings")
-	end)
-
-	Core.logLoad("hub 3.1")
+	buildHub()
+	Core.logLoad("hub 3.2")
 	Core.toast(T("hub_ready"), "ok", 2)
 end
 
