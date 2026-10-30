@@ -1,8 +1,8 @@
--- v5.0 (hub v3): no start/stop log lines of its own (the core writes [LOAD]/[UNLOAD]), the X button asks first.
--- AutoFarm v4.9 (hub build): v4.8.1 under the hub, farm logic untouched. Core log / language RU-EN / saved settings /
--- toasts / autopause (the hub-wide switch). Base: v4.8 + TEMPORARY cycle diagnostics (stat line: cycle / grow / eff). Farm logic untouched.
+-- AutoFarm v4.8.1: v4.8 + TEMPORARY cycle diagnostics (stat line: cycle / grow / eff). Farm logic untouched.
 --
--- AutoFarm v4.8: ON/OFF + MODE + X (unload)
+-- AutoFarm v4.8 as a hub farm (garden.luau, hub v2): ON/OFF + MODE + X (unload)
+-- hub v2: Core log / saved settings / language / copy-log / Core.guard (autopause, restart after death, watchdog).
+-- Farm logic untouched.
 --
 -- v4.8 (farm logic untouched): the stall watchdog no longer counts time while a planted soil is still growing
 -- (RT.nextRipe known), so long-growing crops do not trigger a false warning or auto-stop; session time is now
@@ -46,6 +46,27 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local CollectionService = game:GetService("CollectionService")
 local HttpService = game:GetService("HttpService")
 
+local Core = getgenv().HubCore
+if not Core then
+    warn("Core not found: start hub.luau first")
+    return
+end
+local T = Core.t
+local function join(...)
+    local a = table.pack(...)
+    for i = 1, a.n do
+        a[i] = tostring(a[i])
+    end
+    return table.concat(a, " ", 1, a.n)
+end
+-- everything the script prints goes to the shared log (copy-log button)
+local function warn(...)
+    Core.log("AFARM", "%s", join(...))
+end
+local function print(...)
+    Core.log("AFARM", "%s", join(...))
+end
+
 local Net = require(ReplicatedStorage.Signals.Net)
 local FarmConfig = require(ReplicatedStorage.Config.FarmConfig)
 local PlayerDataHelper = require(ReplicatedStorage.Helper.PlayerDataHelper)
@@ -54,117 +75,6 @@ local getCurrentSeedAmount = require(ReplicatedStorage.Features.Farm.getCurrentS
 local lp = Players.LocalPlayer
 local PlayerSystem = require(lp:WaitForChild("PlayerScripts").ClientSystems.PlayerSystem)
 local G = getgenv()
-
-local Core = G.HubCore
-if not Core then
-    warn("[AFARM] Core not found: start hub.luau first")
-    return
-end
-local T = Core.t
-local STATE = rawget(_G, "STATE") or G.STATE
-local langOffs, unloaded = {}, false
-Core.addStrings({
-    ru = {
-        g_title = "Огород",
-        g_auto = "авто",
-        g_status = "%s | %d/%d/%d | %d/с\nсемена %d | монеты %d\n%+d/мин | эфф %d%%%s",
-        g_stall_warn = "Огород: нет посадки и сбора %d мин, ферма выглядит зависшей",
-        g_stall_stop = "Огород: ферма стоит %d мин, выключаю",
-        g_unload = "Огород выгружен",
-        g_on = "Огород включён",
-        g_off = "Огород выключен",
-        g_r_seed = "семена",
-        g_r_targetSeeds = "семян в запасе",
-        g_r_buyChunkMax = "макс. пачка покупки",
-        g_r_coinReserve = "резерв монет",
-        g_r_rate = "скорость /с",
-        g_r_maxRate = "авто: макс. скорость",
-        g_r_burst = "пачка запросов",
-        g_r_tick = "интервал скана",
-        g_r_adapt = "адаптивная скорость",
-        g_r_doPlant = "сажать",
-        g_r_doWater = "поливать",
-        g_r_doHarvest = "собирать",
-        g_r_doSell = "продавать",
-        g_r_landWait = "ожидание зачисления, с",
-        g_r_sellEvery = "продавать каждые, с",
-        g_r_jitter = "разброс таймингов",
-        g_r_humanPause = "случайные паузы",
-        g_r_breakEvery = "перерыв каждые, с",
-        g_r_breakLen = "длина перерыва, с",
-        g_r_sortByDistance = "сначала ближние грядки",
-        g_r_coolPlant = "кулдаун посадки",
-        g_r_coolWater = "кулдаун полива",
-        g_r_coolHarvest = "кулдаун сбора",
-        g_r_failLimit = "сбоев до бана",
-        g_r_banTime = "время бана",
-        g_r_grace = "задержка оценки",
-        g_r_idleTick = "интервал простоя",
-        g_r_buyTries = "попыток покупки",
-        g_r_buyWait = "ожидание покупки",
-        g_r_noBuyPause = "пауза после отказа",
-        g_r_chunkMemory = "память о пачке",
-        g_r_trace = "лог в консоль",
-        g_h_CROP = "КУЛЬТУРА",
-        g_h_SPEED = "СКОРОСТЬ",
-        g_h_ACTIONS = "ДЕЙСТВИЯ",
-        g_h_SELLING = "ПРОДАЖА",
-        g_h_HUMAN = "ЧЕЛОВЕЧНОСТЬ",
-        g_h_TIMING = "ТАЙМИНГИ",
-        g_h_BUYING = "ПОКУПКА",
-        g_h_OTHER = "ПРОЧЕЕ",
-    },
-    en = {
-        g_title = "Garden",
-        g_auto = "auto",
-        g_status = "%s | %d/%d/%d | %d/s\nseeds %d | coins %d\n%+d/min | eff %d%%%s",
-        g_stall_warn = "Garden: no plant or harvest for %d min, the farm looks stuck",
-        g_stall_stop = "Garden: stuck for %d min, switching OFF",
-        g_unload = "Garden unloaded",
-        g_on = "Garden on",
-        g_off = "Garden off",
-        g_r_seed = "seed",
-        g_r_targetSeeds = "seeds in stock",
-        g_r_buyChunkMax = "buy chunk max",
-        g_r_coinReserve = "coin reserve",
-        g_r_rate = "rate /s",
-        g_r_maxRate = "auto max rate",
-        g_r_burst = "burst",
-        g_r_tick = "scan interval",
-        g_r_adapt = "adaptive rate",
-        g_r_doPlant = "plant",
-        g_r_doWater = "water",
-        g_r_doHarvest = "harvest",
-        g_r_doSell = "sell",
-        g_r_landWait = "landing wait (s)",
-        g_r_sellEvery = "sell every (s)",
-        g_r_jitter = "timing jitter",
-        g_r_humanPause = "random pauses",
-        g_r_breakEvery = "break every (s)",
-        g_r_breakLen = "break length (s)",
-        g_r_sortByDistance = "nearest soil first",
-        g_r_coolPlant = "plant cooldown",
-        g_r_coolWater = "water cooldown",
-        g_r_coolHarvest = "harvest cooldown",
-        g_r_failLimit = "fails before ban",
-        g_r_banTime = "ban time",
-        g_r_grace = "judge delay (grace)",
-        g_r_idleTick = "idle interval",
-        g_r_buyTries = "buy attempts",
-        g_r_buyWait = "buy wait",
-        g_r_noBuyPause = "pause after refusal",
-        g_r_chunkMemory = "chunk memory",
-        g_r_trace = "console log",
-        g_h_CROP = "CROP",
-        g_h_SPEED = "SPEED",
-        g_h_ACTIONS = "ACTIONS",
-        g_h_SELLING = "SELLING",
-        g_h_HUMAN = "HUMAN",
-        g_h_TIMING = "TIMING",
-        g_h_BUYING = "BUYING",
-        g_h_OTHER = "OTHER",
-    },
-})
 local clock = os.clock
 local rand = Random.new()
 
@@ -185,13 +95,17 @@ if oldGui then
 end
 
 local unload -- assigned below
-if STATE and STATE.onCleanup then
-    STATE.onCleanup(function()
-        if unload then
-            unload()
-        end
-    end)
-end
+local MYSCOPE = rawget(_G, "STATE") or getgenv().STATE
+pcall(function()
+    local ST = rawget(_G, "STATE") or getgenv().STATE
+    if ST then
+        ST.onCleanup(function()
+            if unload then
+                unload()
+            end
+        end)
+    end
+end)
 
 -- ========== configuration ==========
 local MODES = { "auto", "slow", "medium", "fast", "fastest", "custom" }
@@ -200,16 +114,31 @@ local MODE_LABEL = { auto = "AUTO", slow = "SLOW", medium = "MEDIUM", fast = "FA
 local AF = G.AFARM or {}
 G.AFARM = AF
 AF.enabled = false
--- saved settings (AutoFarmHub/settings.json): the mode and every menu value the user changed; enabled is never saved
-local SAVED = Core.getFarm("garden", { mode = "auto", o = {} })
-for k, v in pairs(SAVED.o) do
-    local tv = type(v)
-    if AF[k] == nil and (tv == "number" or tv == "boolean" or tv == "string") then
-        AF[k] = v
+-- saved settings (AutoFarmHub/settings.json): mode and every menu row; enabled is never saved
+local SAVEKEYS = {
+    "mode", "seed", "targetSeeds", "buyChunkMax", "coinReserve", "rate", "maxRate", "burst", "tick", "adapt",
+    "doPlant", "doWater", "doHarvest", "doSell", "landWait", "sellEvery", "jitter", "humanPause", "breakEvery",
+    "breakLen", "sortByDistance", "coolPlant", "coolWater", "coolHarvest", "failLimit", "banTime", "grace",
+    "idleTick", "buyTries", "buyWait", "noBuyPause", "chunkMemory", "trace",
+}
+do
+    local raw = Core.getRaw("garden")
+    for _, k in ipairs(SAVEKEYS) do
+        local v = raw[k]
+        local tv = type(v)
+        if AF[k] == nil and (tv == "number" or tv == "string" or tv == "boolean") then
+            AF[k] = v
+        end
     end
 end
-if AF.mode == nil and table.find(MODES, SAVED.mode) then
-    AF.mode = SAVED.mode
+local function saveSettings()
+    local o = {}
+    for _, k in ipairs(SAVEKEYS) do
+        if AF[k] ~= nil then
+            o[k] = AF[k]
+        end
+    end
+    Core.setFarm("garden", o)
 end
 if not table.find(MODES, AF.mode) then
     AF.mode = "auto"
@@ -347,11 +276,7 @@ local hLast = setmetatable({}, { __mode = "k" }) -- diag: soil -> time of its pr
 
 local function log(...)
     if AF.trace then
-        local parts = {}
-        for i = 1, select("#", ...) do
-            parts[i] = tostring((select(i, ...)))
-        end
-        Core.log("AFARM", "%s", table.concat(parts, " "))
+        print(...)
     end
 end
 
@@ -460,6 +385,7 @@ local function setMode(m)
     end
     AF.mode = m
     resetRate()
+    saveSettings()
 end
 AF.setMode = setMode
 resetRate()
@@ -1657,6 +1583,105 @@ for k in pairs(FarmConfig.Crops) do
 end
 table.sort(cropNames)
 
+Core.addStrings({
+    ru = {
+        ["g.CROP"] = "КУЛЬТУРА",
+        ["g.seed"] = "семена",
+        ["g.seeds in stock"] = "семян в запасе",
+        ["g.buy chunk max"] = "макс. пачка покупки",
+        ["g.coin reserve"] = "резерв монет",
+        ["g.SPEED"] = "СКОРОСТЬ",
+        ["g.rate /s"] = "запросов/с",
+        ["g.auto max rate"] = "авто макс. скорость",
+        ["g.burst"] = "пачка запросов",
+        ["g.scan interval"] = "интервал скана",
+        ["g.adaptive rate"] = "адаптивная скорость",
+        ["g.ACTIONS"] = "ДЕЙСТВИЯ",
+        ["g.plant"] = "посадка",
+        ["g.water"] = "полив",
+        ["g.harvest"] = "сбор",
+        ["g.sell"] = "продажа",
+        ["g.SELLING"] = "ПРОДАЖА",
+        ["g.landing wait (s)"] = "ждать урожай (с)",
+        ["g.sell every (s)"] = "продавать каждые (с)",
+        ["g.HUMAN"] = "ЧЕЛОВЕЧНОСТЬ",
+        ["g.timing jitter"] = "разброс задержек",
+        ["g.random pauses"] = "случайные паузы",
+        ["g.break every (s)"] = "перерыв каждые (с)",
+        ["g.break length (s)"] = "длина перерыва (с)",
+        ["g.nearest soil first"] = "сначала ближние грядки",
+        ["g.TIMING"] = "ТАЙМИНГИ",
+        ["g.plant cooldown"] = "пауза посадки",
+        ["g.water cooldown"] = "пауза полива",
+        ["g.harvest cooldown"] = "пауза сбора",
+        ["g.fails before ban"] = "неудач до бана",
+        ["g.ban time"] = "время бана",
+        ["g.judge delay (grace)"] = "задержка оценки",
+        ["g.idle interval"] = "интервал простоя",
+        ["g.BUYING"] = "ПОКУПКА",
+        ["g.buy attempts"] = "попыток покупки",
+        ["g.buy wait"] = "ожидание покупки",
+        ["g.pause after refusal"] = "пауза после отказа",
+        ["g.chunk memory"] = "память пачки",
+        ["g.OTHER"] = "ПРОЧЕЕ",
+        ["g.console log"] = "лог в консоль",
+        ["g_on"] = "ВКЛ",
+        ["g_off"] = "ВЫКЛ",
+        ["g_pause"] = "ПАУЗА",
+        ["g_toast_unload"] = "Огород выгружен",
+    },
+    en = {
+        ["g.CROP"] = "CROP",
+        ["g.seed"] = "seed",
+        ["g.seeds in stock"] = "seeds in stock",
+        ["g.buy chunk max"] = "buy chunk max",
+        ["g.coin reserve"] = "coin reserve",
+        ["g.SPEED"] = "SPEED",
+        ["g.rate /s"] = "rate /s",
+        ["g.auto max rate"] = "auto max rate",
+        ["g.burst"] = "burst",
+        ["g.scan interval"] = "scan interval",
+        ["g.adaptive rate"] = "adaptive rate",
+        ["g.ACTIONS"] = "ACTIONS",
+        ["g.plant"] = "plant",
+        ["g.water"] = "water",
+        ["g.harvest"] = "harvest",
+        ["g.sell"] = "sell",
+        ["g.SELLING"] = "SELLING",
+        ["g.landing wait (s)"] = "landing wait (s)",
+        ["g.sell every (s)"] = "sell every (s)",
+        ["g.HUMAN"] = "HUMAN",
+        ["g.timing jitter"] = "timing jitter",
+        ["g.random pauses"] = "random pauses",
+        ["g.break every (s)"] = "break every (s)",
+        ["g.break length (s)"] = "break length (s)",
+        ["g.nearest soil first"] = "nearest soil first",
+        ["g.TIMING"] = "TIMING",
+        ["g.plant cooldown"] = "plant cooldown",
+        ["g.water cooldown"] = "water cooldown",
+        ["g.harvest cooldown"] = "harvest cooldown",
+        ["g.fails before ban"] = "fails before ban",
+        ["g.ban time"] = "ban time",
+        ["g.judge delay (grace)"] = "judge delay (grace)",
+        ["g.idle interval"] = "idle interval",
+        ["g.BUYING"] = "BUYING",
+        ["g.buy attempts"] = "buy attempts",
+        ["g.buy wait"] = "buy wait",
+        ["g.pause after refusal"] = "pause after refusal",
+        ["g.chunk memory"] = "chunk memory",
+        ["g.OTHER"] = "OTHER",
+        ["g.console log"] = "console log",
+        ["g_on"] = "ON",
+        ["g_off"] = "OFF",
+        ["g_pause"] = "PAUSE",
+        ["g_toast_unload"] = "Garden unloaded",
+    },
+})
+local function GT(text)
+    return T("g." .. text)
+end
+local langRefresh = {} -- functions that re-draw translated texts
+
 local function new(class, props, parent)
     local o = Instance.new(class)
     for k, v in pairs(props) do
@@ -1672,7 +1697,7 @@ local ACTIVE, HOT = Color3.fromRGB(40, 110, 200), Color3.fromRGB(215, 110, 30)
 
 local gui = new("ScreenGui", { Name = "AFarmGUI", ResetOnSpawn = false }, lp:WaitForChild("PlayerGui"))
 local root = new("Frame", {
-    Size = UDim2.fromOffset(200, 158), Position = UDim2.new(0, 20, 0.5, -79),
+    Size = UDim2.fromOffset(200, 166), Position = UDim2.new(0, 20, 0.5, -83),
     BackgroundColor3 = BG, BorderSizePixel = 0, Active = true, Draggable = true,
 }, gui)
 new("UICorner", { CornerRadius = UDim.new(0, 8) }, root)
@@ -1686,42 +1711,37 @@ local function button(parent, props)
 end
 
 local toggle = button(root, {
-    Position = UDim2.fromOffset(6, 26), Size = UDim2.new(1, -12, 0, 72), TextSize = 18,
-    AutoButtonColor = false, RichText = true, Text = T("v_off"):upper(), BackgroundColor3 = RED,
+    Position = UDim2.fromOffset(6, 6), Size = UDim2.new(1, -12, 0, 72), TextSize = 18,
+    AutoButtonColor = false, RichText = true, Text = T("g_off"), BackgroundColor3 = RED,
 })
 local closeBtn = button(root, {
-    Position = UDim2.new(1, -26, 0, 3), Size = UDim2.fromOffset(20, 18), TextSize = 12, Text = "X",
+    Position = UDim2.new(1, -26, 0, 8), Size = UDim2.fromOffset(18, 18), TextSize = 12, Text = "X",
     BackgroundColor3 = Color3.fromRGB(120, 36, 36), ZIndex = 5,
 })
--- header: title + [log] [lang] (X above)
-local titleLbl = new("TextLabel", {
-    Position = UDim2.fromOffset(8, 3), Size = UDim2.new(1, -112, 0, 18), BackgroundTransparency = 1,
-    TextColor3 = GRAY, Font = Enum.Font.GothamBold, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
-}, root)
-Core.bindText(titleLbl, "g_title")
-local langBtn = button(root, {
-    Position = UDim2.new(1, -58, 0, 3), Size = UDim2.fromOffset(28, 18), TextSize = 10, Text = Core.getLang():upper(),
-    BackgroundColor3 = BTN,
-})
-local logBtn = button(root, {
-    Position = UDim2.new(1, -100, 0, 3), Size = UDim2.fromOffset(38, 18), TextSize = 10, BackgroundColor3 = BTN,
-})
-Core.bindText(logBtn, "log_btn")
-langOffs[#langOffs + 1] = Core.onLang(function(l)
-    langBtn.Text = l:upper()
-end)
-langBtn.Activated:Connect(Core.nextLang)
-logBtn.Activated:Connect(Core.copyLog)
 
 -- mode buttons: 3 x 2 grid
 local modeBtns = {}
 for i, m in ipairs(MODES) do
     local col, row = (i - 1) % 3, math.floor((i - 1) / 3)
     modeBtns[m] = button(root, {
-        Position = UDim2.fromOffset(6 + col * 63, 104 + row * 26), Size = UDim2.fromOffset(59, 22),
+        Position = UDim2.fromOffset(6 + col * 63, 84 + row * 26), Size = UDim2.fromOffset(59, 22),
         TextSize = 10, Text = MODE_LABEL[m], BackgroundColor3 = BTN,
     })
 end
+
+local langBtn = button(root, {
+    Position = UDim2.fromOffset(6, 138), Size = UDim2.fromOffset(92, 22), TextSize = 10, BackgroundColor3 = BTN,
+})
+local logBtn = button(root, {
+    Position = UDim2.fromOffset(102, 138), Size = UDim2.fromOffset(92, 22), TextSize = 10, BackgroundColor3 = BTN,
+})
+Core.bindText(logBtn, "log_copy")
+logBtn.Activated:Connect(Core.copyLog)
+langBtn.Activated:Connect(Core.nextLang)
+langRefresh[#langRefresh + 1] = function()
+    langBtn.Text = T("lang_label") .. ": " .. Core.getLang():upper()
+end
+langRefresh[1]()
 
 -- CUSTOM menu (opens under the window): many parameters, grouped
 local menu = new("ScrollingFrame", {
@@ -1740,21 +1760,21 @@ local order, updaters = 0, {}
 local function addHeader(text)
     order = order + 1
     local h = new("TextLabel", {
-        Size = UDim2.new(1, -8, 0, 18), LayoutOrder = order, BackgroundTransparency = 1, Text = text,
+        Size = UDim2.new(1, -8, 0, 18), LayoutOrder = order, BackgroundTransparency = 1, Text = GT(text),
         TextColor3 = GRAY, Font = Enum.Font.GothamBold, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left,
     }, menu)
-    Core.bindText(h, "g_h_" .. text)
+    langRefresh[#langRefresh + 1] = function()
+        h.Text = GT(text)
+    end
 end
-
-local saveCfg = function() end -- assigned after the menu table
 
 local function show(key, v)
     if v == true then
         return T("v_on")
     elseif v == false then
         return T("v_off")
-    elseif (key == "targetSeeds" and v == 0) or v == "auto" then
-        return T("g_auto")
+    elseif key == "targetSeeds" and v == 0 then
+        return "auto"
     end
     return tostring(v)
 end
@@ -1773,18 +1793,19 @@ local function addRow(text, key, opts)
         return v
     end
     local function upd()
-        b.Text = T("g_r_" .. key) .. ": " .. show(key, get())
+        b.Text = GT(text) .. ": " .. show(key, get())
     end
     b.Activated:Connect(function()
         AF[key] = opts[(table.find(opts, get()) or 0) % #opts + 1]
         if key == "rate" then
             resetRate()
         end
+        saveSettings()
         upd()
-        saveCfg()
     end)
     upd()
     updaters[#updaters + 1] = upd
+    langRefresh[#langRefresh + 1] = upd
 end
 
 local seedOpts = { "auto" }
@@ -1841,15 +1862,6 @@ for _, r in ipairs(MENU) do
         addRow(r[1], r[2], r[3])
     end
 end
-saveCfg = function()
-    local o = {}
-    for _, r in ipairs(MENU) do
-        if #r == 3 and AF[r[2]] ~= nil then
-            o[r[2]] = AF[r[2]]
-        end
-    end
-    Core.setFarm("garden", { mode = AF.mode, o = o })
-end
 
 local function refresh()
     for m, b in pairs(modeBtns) do
@@ -1858,12 +1870,19 @@ local function refresh()
     menu.Visible = AF.mode == "custom"
     toggle.BackgroundColor3 = AF.enabled and GREEN or RED
     if not AF.enabled then
-        toggle.Text = T("v_off"):upper()
+        toggle.Text = T("g_off")
     end
     for _, f in ipairs(updaters) do
         f()
     end
 end
+
+local langOff = Core.onLang(function()
+    for _, f in ipairs(langRefresh) do
+        pcall(f)
+    end
+    pcall(refresh)
+end)
 
 -- session summary: what the farm did since it was switched ON
 local SES = { h0 = 0, p0 = 0 }
@@ -1882,8 +1901,8 @@ local function statusLine()
     local c = sid and FarmConfig.Crops[sid]
     local perMin = S.active > 5 and (coins() - S.coins0) / S.active * 60 or 0
     local effPct = S.actionsTotal > 0 and (1 - S.retriesTotal / S.actionsTotal) * 100 or 100
-    return T(
-        "g_status",
+    return string.format(
+        "%s | %d/%d/%d | %d/s\nseeds %d | coins %d\n%+d/min | eff %d%%%s",
         c and c.displayName or tostring(sid),
         S.planted,
         S.empty,
@@ -1901,10 +1920,10 @@ local function onClick(btn, fn)
     conns[#conns + 1] = btn.Activated:Connect(function()
         fn()
         refresh()
-        saveCfg()
     end)
 end
 onClick(toggle, function()
+    Core.guard.cancel("garden")
     AF.enabled = not AF.enabled
     if AF.enabled then
         S.coins0, S.active, S.actionsTotal, S.retriesTotal = coins(), 0, 0, 0
@@ -1913,8 +1932,7 @@ onClick(toggle, function()
     else
         pcall(sessionSummary, "stop")
     end
-    toggle.Text = AF.enabled and (T("v_on"):upper() .. '\n<font size="11">' .. statusLine() .. "</font>") or T("v_off"):upper()
-    Core.toast(T(AF.enabled and "g_on" or "g_off"), AF.enabled and "ok" or "info", 2)
+    toggle.Text = AF.enabled and (T("g_on") .. '\n<font size="11">' .. statusLine() .. "</font>") or T("g_off")
 end)
 for m, b in pairs(modeBtns) do
     onClick(b, function()
@@ -1923,15 +1941,10 @@ for m, b in pairs(modeBtns) do
 end
 
 unload = function()
-    if unloaded then
-        return
-    end
-    unloaded = true
     if AF.enabled then
         pcall(sessionSummary, "unload")
     end
     pcall(saveLearn, true)
-    pcall(saveCfg)
     AF.enabled = false
     for _, t in ipairs(threads) do
         pcall(task.cancel, t)
@@ -1944,37 +1957,42 @@ unload = function()
     pcall(function()
         gui:Destroy()
     end)
-    for _, off in ipairs(langOffs) do
-        pcall(off)
-    end
+    pcall(langOff)
+    pcall(saveSettings)
+    pcall(Core.guard.unregister, "garden")
     G.AFARM, G._AFARM_THREADS, G._AFARM_CONNS = nil, nil, nil
-    Core.toast(T("g_unload"), "info", 2)
+    log("unloaded")
+    Core.toast(T("g_toast_unload"), "info", 2)
+    Core.afterFarm(MYSCOPE) -- nothing else needs the shared module once the only farm is gone
 end
 AF.unload = unload
-closeBtn.Activated:Connect(function()
-    Core.confirm({
-        titleKey = "confirm_title", textKey = "confirm_text", yesKey = "confirm_yes", noKey = "confirm_no",
-        onYes = function()
-            if STATE and STATE.stop then
-                STATE.stop() -- runs unload() through onCleanup
-            else
-                unload()
-            end
-            task.delay(2.5, function() -- nothing else needs the shared module once the only farm is gone
-                if Core.unload then
-                    Core.unload()
-                end
-            end)
-        end,
-    })
-end)
-langOffs[#langOffs + 1] = Core.onLang(function()
-    refresh()
-    if AF.enabled then
-        toggle.Text = T("v_on"):upper() .. '\n<font size="11">' .. statusLine() .. "</font>"
-    end
-end)
+closeBtn.Activated:Connect(unload)
 refresh()
+
+-- hub guard: autopause while dead, restart after death, anti-freeze watchdog
+Core.guard.register("garden", {
+    isEnabled = function()
+        return AF.enabled
+    end,
+    setEnabled = function(v, reason)
+        AF.enabled = v
+        pcall(refresh)
+        if not v and reason == "autopause" then
+            toggle.Text = T("g_pause")
+        end
+    end,
+    progress = function()
+        return S.harvested + S.plantedTotal
+    end,
+    idleOk = function() -- something is still growing: waiting, not stuck
+        return RT.nextRipe ~= nil
+    end,
+    stallSec = 240,
+    restart = function(reason)
+        log("guard restart:", reason)
+        resetRate()
+    end,
+})
 
 -- ========== threads ==========
 -- status line (2 Hz); when the farm is off it refreshes the soil counters itself
@@ -1995,21 +2013,19 @@ threads[#threads + 1] = task.spawn(function()
             if prog ~= wdProg then
                 wdProg, wdT, wdWarned = prog, now, false
             else
-                if RT.nextRipe ~= nil or Core.paused() then
-                    wdT = now -- something is still growing, or autopause is holding the farm: not stuck
+                if RT.nextRipe ~= nil then
+                    wdT = now -- something is still growing: not stuck
                 end
                 local idle = now - wdT
                 if not wdWarned and AF.stallWarn > 0 and idle >= AF.stallWarn then
                     wdWarned = true
-                    warn("[AFARM] no plant or harvest for " .. math.floor(idle) .. " s: the farm looks stuck")
-                    Core.toast(T("g_stall_warn", math.floor(idle / 60)), "warn", 6)
+                    warn("no plant or harvest for " .. math.floor(idle) .. " s: the farm looks stuck")
                 end
                 if AF.stallStop > 0 and idle >= AF.stallStop then
-                    warn("[AFARM] stuck for " .. math.floor(idle) .. " s: switching the farm OFF")
-                    Core.toast(T("g_stall_stop", math.floor(idle / 60)), "err", 6)
+                    warn("stuck for " .. math.floor(idle) .. " s: switching the farm OFF")
                     pcall(sessionSummary, "watchdog")
                     AF.enabled = false
-                    toggle.Text = T("v_off"):upper()
+                    toggle.Text = T("g_off")
                     wdT = now
                     pcall(refresh)
                 end
@@ -2033,7 +2049,7 @@ threads[#threads + 1] = task.spawn(function()
             end
             S.active = S.active + (clock() - actT)
             actT = clock()
-            toggle.Text = T("v_on"):upper() .. '\n<font size="11">' .. statusLine() .. "</font>"
+            toggle.Text = T("g_on") .. '\n<font size="11">' .. statusLine() .. "</font>"
         end
         task.wait(0.5)
     end
@@ -2044,11 +2060,11 @@ end)
 threads[#threads + 1] = task.spawn(function()
     local lastErr, nextBreak = 0, 0
     while true do
-        if AF.enabled and not Core.paused() then
+        if AF.enabled then
             local ok, res = pcall(farmPass)
             if not ok and clock() - lastErr > 5 then
                 lastErr = clock()
-                warn("[AFARM] error: " .. tostring(res))
+                warn("error: " .. tostring(res))
             end
             local acted = ok and res or 0
 
@@ -2097,29 +2113,29 @@ AF.crops = function() -- the crop table of the game config, cheapest sale first
         return a.name < b.name
     end)
     for _, x in ipairs(list) do
-        print("[AFARM] cfg", x.name, "seed", x.c.seedPrice, "sale", x.c.cropPrice, "time", x.c.harvestTimeSec, "lvl", x.c.requiredLevel or 0)
+        print("cfg", x.name, "seed", x.c.seedPrice, "sale", x.c.cropPrice, "time", x.c.harvestTimeSec, "lvl", x.c.requiredLevel or 0)
     end
 end
 AF.forget = function() -- clear everything learned (model, growth times) and the saved file
     resetModel()
     RT.grow = { {}, {} }
     saveLearn(true)
-    print("[AFARM] learned data cleared")
+    print("learned data cleared")
 end
 AF.relearn = function() -- forget what was learned: the next waves probe again
     resetModel()
-    print("[AFARM] model reset: probing again")
+    print("model reset: probing again")
 end
 
 -- diagnostic: attributes of a soil and of its parents
 AF.dump = function()
-    print("[AFARM] model:", M.state, "k", M.k, "yield", M.y, "run", RT.runs)
+    print("model:", M.state, "k", M.k, "yield", M.y, "run", RT.runs)
     local soil = next(soils)
     if not soil then
-        print("[AFARM] no FarmSoil found")
+        print("no FarmSoil found")
         return
     end
-    print("[AFARM] soils:", S.soils)
+    print("soils:", S.soils)
     local o = soil
     while o and o ~= game do
         print(o:GetFullName())
@@ -2145,10 +2161,11 @@ do
         missing[#missing + 1] = "FarmConfig.Crops"
     end
     if #missing > 0 then
-        warn("[AFARM] startup check: missing " .. table.concat(missing, ", ") .. " (the game may have been updated)")
+        warn("startup check: missing " .. table.concat(missing, ", ") .. " (the game may have been updated)")
     end
 end
 
 if AF.trace then
     pcall(AF.crops)
 end
+print("loaded. mode=" .. AF.mode)
