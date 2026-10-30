@@ -1,4 +1,23 @@
--- AutoFarm Hub: shared module (Core) v2.0
+--[[ ============================================================
+ AutoFarm Hub · core.luau · v3.0   (@version 3.0)
+ Part of the AutoFarm Hub project: hub.luau (the only file the user runs), core.luau (this file, shared module),
+ garden.luau, fishing.luau, mining.luau (farms), versions.json (version list), lang.luau (optional extra languages).
+ Needs an executor with: loadstring, game:HttpGet, writefile/readfile/isfile (for saved settings), gethui (optional).
+ See README.md for the file layout and how to add a language.
+============================================================ ]]
+-- AutoFarm Hub: shared module (Core) v3.0
+-- v3.0 (hub v4.0, cosmetics): themes (dark / light + accent colour), remembered panel positions, hotkey + floating button
+--   to show / hide the whole interface, anti-AFK, unified farm panel (dock: ON/OFF, speed, settings, stats, buff timer,
+--   last 20 log lines), generic respawn handling, new languages through Core.addStrings (the language list grows by itself),
+--   Core.info window (About), full clean-up of getgenv on unload.
+--   Farm hooks (all optional, set by a farm script):  Core.farmHooks = {
+--       isOn = fn -> bool, toggle = fn, settings = fn (opens / closes the farm's own menu),
+--       speed = { label = fn -> string, next = fn }, stats = fn -> { count = n, coins = n|nil, unitKey = "u_mined" },
+--       onRespawn = fn(character) }
+--   Core.registerGui(screenGui)   a farm with its own ScreenGui joins the theme + the hide / show hotkey
+--   Core.rememberPos(frame, key)  saves / restores the position of a draggable frame
+--   Core.setTheme("dark"|"light") / Core.setAccent(name) / Core.ACCENT_LIST
+--   Core.setVisible(bool) / Core.toggleVisible()   Core.info{title|titleKey, text|textKey}
 -- v2.1: English default on first run, console log off by default, confirm dialog has no full-screen dim layer.
 -- Provides: languages, settings saving, log, toasts, panel, copy-log button, farm scopes, buff (cooking) system,
 -- the small dock window of a running farm (back to the hub + buff controls).
@@ -44,8 +63,15 @@ if env.HubCore and env.HubCore.unload then
 	pcall(env.HubCore.unload)
 end
 
-local Core = { VERSION = "2.0", dead = false }
+local Core = { VERSION = "3.0", dead = false }
 env.HubCore = Core
+
+local UIS = game:GetService("UserInputService")
+local coreConns, guis, extraThemed = {}, {}, {} -- core-wide connections (disconnected on unload) and every registered ScreenGui
+local function addConn(c)
+	coreConns[#coreConns + 1] = c
+	return c
+end
 
 local function copy(v)
 	if type(v) ~= "table" then
@@ -290,12 +316,42 @@ local DICT = {
 
 function Core.addStrings(tbl)
 	for lang, strings in pairs(tbl) do
+		if not table.find(Core.LANGS, lang) then
+			Core.LANGS[#Core.LANGS + 1] = lang -- a new language pack (lang.luau): it appears in the language button at once
+		end
 		DICT[lang] = DICT[lang] or {}
 		for k, v in pairs(strings) do
 			DICT[lang][k] = v
 		end
 	end
 end
+
+
+-- v3.0 strings (core): panel, themes, hotkey, stats, about
+Core.addStrings({
+	ru = {
+		u_items = "предметов", u_mined = "добыто", u_harvest = "собрано", u_caught = "поймано",
+		st_line1 = "%s · %s: %s", st_rate = "%s/ч", st_coins = "%s монет/ч", st_wait = "фарм выключен",
+		dock_speed = "скорость: %s", dock_log = "журнал", dock_log_hide = "журнал ▴", dock_copy = "копировать лог",
+		dock_log_empty = "журнал пуст",
+		respawn_cont = "Персонаж возродился, фарм продолжает работу",
+		theme_label = "тема", theme_dark = "тёмная", theme_light = "светлая", accent_label = "акцент",
+		hotkey_label = "кнопка меню", fab_label = "плавающая кнопка", afk_label = "антиафк",
+		about_btn = "о проекте", upd_btn = "проверить обновления", info_close = "Закрыть",
+		ui_hidden = "Интерфейс скрыт, вернуть: %s",
+	},
+	en = {
+		u_items = "items", u_mined = "mined", u_harvest = "harvested", u_caught = "caught",
+		st_line1 = "%s · %s: %s", st_rate = "%s/h", st_coins = "%s coins/h", st_wait = "farm is off",
+		dock_speed = "speed: %s", dock_log = "log", dock_log_hide = "log ▴", dock_copy = "copy log",
+		dock_log_empty = "the log is empty",
+		respawn_cont = "Character respawned, the farm keeps working",
+		theme_label = "theme", theme_dark = "dark", theme_light = "light", accent_label = "accent",
+		hotkey_label = "menu key", fab_label = "floating button", afk_label = "anti-AFK",
+		about_btn = "about", upd_btn = "check for updates", info_close = "Close",
+		ui_hidden = "Interface hidden, show again: %s",
+	},
+})
 
 function Core.t(key, ...)
 	local d = DICT[data.lang] or DICT.en
@@ -409,6 +465,15 @@ function ui.label(parent, props)
 end
 
 local sg
+local function parentGui(g)
+	if not pcall(function()
+		g.Parent = (gethui and gethui()) or game:GetService("CoreGui")
+	end) or not g.Parent then
+		g.Parent = P:WaitForChild("PlayerGui")
+	end
+end
+
+local hidden = false
 function Core.gui()
 	if Core.dead then
 		return nil
@@ -418,19 +483,214 @@ function Core.gui()
 	end
 	sg = Instance.new("ScreenGui")
 	sg.Name, sg.ResetOnSpawn, sg.DisplayOrder = "HubCoreGui", false, 1000
-	if not pcall(function()
-		sg.Parent = (gethui and gethui()) or game:GetService("CoreGui")
-	end) or not sg.Parent then
-		sg.Parent = P:WaitForChild("PlayerGui")
-	end
+	sg.Enabled = not hidden
+	parentGui(sg)
+	guis[#guis + 1] = sg
 	return sg
+end
+
+
+-- ============================================================
+-- Themes (v3.0): ui.C is changed IN PLACE, so every script that holds `local C = ui.C` follows the theme.
+-- Existing GUI objects are recoloured by colour: an object that has a role colour gets the new role colour.
+-- ============================================================
+local function rgb(r, g, b)
+	return Color3.fromRGB(r, g, b)
+end
+local THEMES = {
+	dark = { BG = rgb(24, 24, 30), BTN = rgb(44, 44, 54), WHITE = rgb(235, 235, 240), GRAY = rgb(150, 150, 160),
+		RED = rgb(170, 50, 50), ORANGE = rgb(196, 130, 30), BLUE = rgb(60, 110, 200) },
+	light = { BG = rgb(238, 238, 244), BTN = rgb(206, 206, 220), WHITE = rgb(26, 26, 32), GRAY = rgb(92, 92, 106),
+		RED = rgb(224, 108, 108), ORANGE = rgb(232, 172, 72), BLUE = rgb(108, 148, 224) },
+}
+local ACCENTS = {
+	green = { dark = rgb(46, 160, 67), light = rgb(98, 196, 118) },
+	blue = { dark = rgb(34, 138, 222), light = rgb(96, 176, 240) },
+	purple = { dark = rgb(138, 84, 214), light = rgb(184, 148, 240) },
+	pink = { dark = rgb(206, 72, 138), light = rgb(240, 148, 190) },
+	teal = { dark = rgb(30, 160, 160), light = rgb(104, 206, 206) },
+}
+Core.ACCENT_LIST = { "green", "blue", "purple", "pink", "teal" }
+Core.THEME_LIST = { "dark", "light" }
+local ROLES = { "BG", "BTN", "WHITE", "GRAY", "RED", "ORANGE", "BLUE", "GREEN" }
+-- hard-coded dark colours of older farm scripts -> the role they stand for
+local ALIAS = {
+	["26,26,32"] = "BG", ["48,48,58"] = "BTN", ["140,140,150"] = "GRAY", ["120,36,36"] = "RED",
+	["40,110,200"] = "BLUE", ["215,110,30"] = "ORANGE",
+}
+local function ckey(c)
+	return string.format("%d,%d,%d", math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
+end
+local function paletteFor(theme, accent)
+	local p = {}
+	for k, v in pairs(THEMES[theme]) do
+		p[k] = v
+	end
+	p.GREEN = ACCENTS[accent][theme]
+	return p
+end
+local function recolor(root, map)
+	local function fix(o)
+		pcall(function()
+			if o:IsA("GuiObject") then
+				local n = map[ckey(o.BackgroundColor3)]
+				if n then
+					o.BackgroundColor3 = n
+				end
+				if o:IsA("TextLabel") or o:IsA("TextButton") or o:IsA("TextBox") then
+					local n2 = map[ckey(o.TextColor3)]
+					if n2 then
+						o.TextColor3 = n2
+					end
+				end
+			elseif o:IsA("UIStroke") then
+				local n = map[ckey(o.Color)]
+				if n then
+					o.Color = n
+				end
+			end
+		end)
+	end
+	fix(root)
+	for _, d in ipairs(root:GetDescendants()) do
+		fix(d)
+	end
+end
+
+local function currentNames()
+	local theme, accent = Core.getGlobal("theme", "dark"), Core.getGlobal("accent", "green")
+	if not THEMES[theme] then
+		theme = "dark"
+	end
+	if not ACCENTS[accent] then
+		accent = "green"
+	end
+	return theme, accent
+end
+
+function Core.applyTheme()
+	local theme, accent = currentNames()
+	local old, new, map = {}, paletteFor(theme, accent), {}
+	for _, r in ipairs(ROLES) do
+		old[r] = C[r]
+	end
+	for k, role in pairs(ALIAS) do
+		map[k] = new[role]
+	end
+	for _, r in ipairs(ROLES) do
+		map[ckey(old[r])] = new[r]
+	end
+	for _, r in ipairs(ROLES) do
+		C[r] = new[r]
+	end
+	for i = #guis, 1, -1 do
+		local g = guis[i]
+		if g.Parent then
+			recolor(g, map)
+		else
+			table.remove(guis, i)
+		end
+	end
+	for _, g in ipairs(extraThemed) do
+		if g.Parent then
+			recolor(g, map)
+		end
+	end
+end
+
+function Core.setTheme(name)
+	if not THEMES[name] then
+		return
+	end
+	Core.setGlobal("theme", name)
+	Core.applyTheme()
+end
+
+function Core.setAccent(name)
+	if not ACCENTS[name] then
+		return
+	end
+	Core.setGlobal("accent", name)
+	Core.applyTheme()
+end
+
+-- a farm with its own ScreenGui: it follows the theme and the hide / show hotkey
+function Core.registerGui(g)
+	if not g or table.find(guis, g) then
+		return
+	end
+	guis[#guis + 1] = g
+	pcall(function()
+		g.Enabled = not hidden
+	end)
+	local map = {}
+	for k, role in pairs(ALIAS) do
+		map[k] = C[role]
+	end
+	local theme, accent = "dark", "green"
+	local base = paletteFor(theme, accent)
+	for _, r in ipairs(ROLES) do
+		map[ckey(base[r])] = C[r]
+	end
+	recolor(g, map)
+end
+
+do -- the saved theme is applied before the first GUI object is created
+	Core.applyTheme()
+end
+
+-- ============================================================
+-- Remembered position of a draggable frame (v3.0). Saved in the settings file under "pos_<key>".
+-- ============================================================
+function Core.rememberPos(frame, key)
+	local saved = Core.getGlobal("pos_" .. key, {})
+	if type(saved.xo) == "number" and type(saved.yo) == "number" then
+		local cam = workspace.CurrentCamera
+		local v = cam and cam.ViewportSize or Vector2.new(1280, 720)
+		local w, h = math.max(frame.Size.X.Offset, 40), math.max(frame.Size.Y.Offset, 40)
+		local ax = (saved.xs or 0) * v.X + saved.xo
+		local ay = (saved.ys or 0) * v.Y + saved.yo
+		ax = math.clamp(ax, 0, math.max(0, v.X - w))
+		ay = math.clamp(ay, 0, math.max(0, v.Y - h))
+		frame.Position = UDim2.fromOffset(ax, ay)
+	end
+	local tok = 0
+	frame:GetPropertyChangedSignal("Position"):Connect(function()
+		tok = tok + 1
+		local mine = tok
+		task.delay(0.6, function()
+			if mine == tok and frame.Parent and not Core.dead then
+				local p = frame.Position
+				Core.setGlobal("pos_" .. key, { xs = p.X.Scale, xo = p.X.Offset, ys = p.Y.Scale, yo = p.Y.Offset })
+			end
+		end)
+	end)
+end
+
+-- ============================================================
+-- Show / hide the whole interface (hotkey, floating button)
+-- ============================================================
+function Core.setVisible(v)
+	hidden = not v
+	for _, g in ipairs(guis) do
+		pcall(function()
+			g.Enabled = v
+		end)
+	end
+end
+
+function Core.toggleVisible()
+	Core.setVisible(hidden)
+	if hidden then
+		Core.log("UI", "hidden")
+	end
 end
 
 -- ============================================================
 -- Toasts
 -- ============================================================
 local toastHolder, toasts, toastN = nil, {}, 0
-local KIND = { info = C.BLUE, ok = C.GREEN, warn = C.ORANGE, err = C.RED }
+local KIND = { info = "BLUE", ok = "GREEN", warn = "ORANGE", err = "RED" }
 
 function Core.toast(text, kind, seconds)
 	pcall(function()
@@ -449,7 +709,7 @@ function Core.toast(text, kind, seconds)
 			})
 		end
 		toastN = toastN + 1
-		local accent = KIND[kind or "info"] or C.BLUE
+		local accent = C[KIND[kind or "info"] or "BLUE"]
 		local f = mk("Frame", toastHolder, {
 			Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = C.BG,
 			BackgroundTransparency = 0.05, BorderSizePixel = 0, LayoutOrder = toastN,
@@ -531,12 +791,16 @@ function Core.confirm(o)
 	})
 	local yes = ui.button(box, {
 		Position = UDim2.fromOffset(12, 110), Size = UDim2.new(0.5, -18, 0, 34), TextSize = 14,
-		BackgroundColor3 = C.RED, Text = pickText(o, "yes"),
+		BackgroundColor3 = o.single and C.GREEN or C.RED, Text = pickText(o, "yes"),
 	})
 	local no = ui.button(box, {
 		Position = UDim2.new(0.5, 6, 0, 110), Size = UDim2.new(0.5, -18, 0, 34), TextSize = 14,
 		Text = pickText(o, "no"),
 	})
+	if o.single then -- one wide button (messages): [yes] only
+		yes.Size = UDim2.new(1, -24, 0, 34)
+		no.Visible = false
+	end
 	local closed = false
 	local function close(cb)
 		if closed then
@@ -564,6 +828,49 @@ function Core.confirm(o)
 	pcall(function()
 		local ti = TweenInfo.new(0.15)
 		TweenService:Create(box, ti, { GroupTransparency = 0 }):Play()
+	end)
+end
+
+
+-- ============================================================
+-- Info window (v3.0): title + scrolling rich text + [Close]. Used for "About".
+--   Core.info{ titleKey=|title=, textKey=|text=, closeKey= }
+-- ============================================================
+local infoBox
+function Core.info(o)
+	local g = Core.gui()
+	if not g then
+		return
+	end
+	if infoBox and infoBox.Parent then
+		pcall(infoBox.Destroy, infoBox)
+	end
+	local box = mk("Frame", g, {
+		Name = "Info", Size = UDim2.fromOffset(340, 300), Position = UDim2.new(0.5, -170, 0.5, -150),
+		BackgroundColor3 = C.BG, BorderSizePixel = 0, Active = true, Draggable = true, ZIndex = 60,
+	})
+	infoBox = box
+	ui.round(box, 10)
+	mk("UIStroke", box, { Color = C.GREEN, Thickness = 1.5 })
+	ui.label(box, {
+		Position = UDim2.fromOffset(12, 8), Size = UDim2.new(1, -24, 0, 22), TextSize = 15,
+		Font = ui.FONT_BOLD, TextXAlignment = Enum.TextXAlignment.Left, Text = pickText(o, "title"),
+	})
+	local scroll = mk("ScrollingFrame", box, {
+		Position = UDim2.fromOffset(10, 36), Size = UDim2.new(1, -20, 1, -88), BackgroundTransparency = 1,
+		BorderSizePixel = 0, ScrollBarThickness = 3, AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new(),
+	})
+	ui.label(scroll, {
+		Size = UDim2.new(1, -8, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, TextWrapped = true, RichText = true,
+		TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+		TextColor3 = C.WHITE, Text = pickText(o, "text"),
+	})
+	local close = ui.button(box, {
+		Position = UDim2.new(0, 12, 1, -42), Size = UDim2.new(1, -24, 0, 32), TextSize = 14,
+		BackgroundColor3 = C.GREEN, Text = o.closeKey and Core.t(o.closeKey) or Core.t("info_close"),
+	})
+	close.Activated:Connect(function()
+		pcall(box.Destroy, box)
 	end)
 end
 
@@ -600,6 +907,9 @@ function Core.panel(opts)
 		BackgroundColor3 = C.BG, BorderSizePixel = 0, Active = true, Draggable = true,
 	})
 	ui.round(root, 8)
+	if opts.posKey then
+		Core.rememberPos(root, opts.posKey)
+	end
 	local title = ui.label(root, {
 		Position = UDim2.fromOffset(10, 5), Size = UDim2.new(1, -120, 0, 20), TextSize = 13,
 		Font = ui.FONT_BOLD, TextColor3 = C.GRAY, TextXAlignment = Enum.TextXAlignment.Left,
@@ -643,15 +953,14 @@ end
 -- ============================================================
 -- Autopause, watchdog, respawn (v1.1)
 -- ============================================================
-local UIS = game:GetService("UserInputService")
 local GuiService = game:GetService("GuiService")
 local focused = true
-UIS.WindowFocused:Connect(function()
+addConn(UIS.WindowFocused:Connect(function()
 	focused = true
-end)
-UIS.WindowFocusReleased:Connect(function()
+end))
+addConn(UIS.WindowFocusReleased:Connect(function()
 	focused = false
-end)
+end))
 
 function Core.paused()
 	if not Core.getGlobal("autopause", false) then
@@ -691,6 +1000,74 @@ function Core.watchdog(scope, o)
 				lastT = now
 			end
 		end
+	end)
+end
+
+
+-- ============================================================
+-- Anti-AFK (v3.0): the standard Idled trick, no visible actions. Hub setting "antiafk" (default on).
+-- ============================================================
+do
+	local VU = game:GetService("VirtualUser")
+	addConn(P.Idled:Connect(function()
+		if not Core.getGlobal("antiafk", true) then
+			return
+		end
+		pcall(function()
+			VU:CaptureController()
+			VU:ClickButton2(Vector2.new())
+		end)
+	end))
+end
+
+-- ============================================================
+-- Hotkey + floating button (v3.0): show / hide every GUI of the project
+-- ============================================================
+Core.HOTKEYS = { "RightShift", "RightControl", "Insert", "Home", "F6" }
+addConn(UIS.InputBegan:Connect(function(input, processed)
+	if processed or Core.dead then
+		return
+	end
+	if input.KeyCode and input.KeyCode.Name == Core.getGlobal("hotkey", "RightShift") then
+		Core.toggleVisible()
+	end
+end))
+
+local fabGui
+function Core.updateFab()
+	local want = Core.getGlobal("fab", UIS.TouchEnabled and not UIS.KeyboardEnabled)
+	if not want or Core.dead then
+		if fabGui then
+			pcall(fabGui.Destroy, fabGui)
+			fabGui = nil
+		end
+		return
+	end
+	if fabGui and fabGui.Parent then
+		return
+	end
+	fabGui = Instance.new("ScreenGui")
+	fabGui.Name, fabGui.ResetOnSpawn, fabGui.DisplayOrder = "HubCoreFab", false, 1001
+	parentGui(fabGui)
+	extraThemed[#extraThemed + 1] = fabGui
+	local b = ui.button(fabGui, {
+		Size = UDim2.fromOffset(40, 40), Position = UDim2.new(0, 8, 0.5, -20), TextSize = 20, Text = "☰",
+		BackgroundColor3 = C.GREEN, Active = true, Draggable = true,
+	})
+	b.BackgroundTransparency = 0.15
+	ui.round(b, 20)
+	Core.rememberPos(b, "fab")
+	local downAt
+	b.InputBegan:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.Touch or i.UserInputType == Enum.UserInputType.MouseButton1 then
+			downAt = b.AbsolutePosition
+		end
+	end)
+	b.Activated:Connect(function()
+		if downAt and (b.AbsolutePosition - downAt).Magnitude > 6 then
+			return -- it was a drag, not a tap
+		end
+		Core.toggleVisible()
 	end)
 end
 
@@ -1014,29 +1391,60 @@ local function startBuff(scope, farm)
 		end
 	end)
 
-	-- ----- dock window -----
+	-- ----- dock window: the unified farm panel (v3.0) -----
+	-- Row 1: [Hub] [ON/OFF] [settings] [X]   Rows 2-3: run time, counter, per hour, coins per hour
+	-- Row 4: buff timer / status   Row 5: buff on/off, dish, lead   Row 6: [speed] [log]   (speed / ON-OFF / settings
+	-- appear only when the farm registered the hooks in Core.farmHooks). The log pane shows the last 20 lines.
 	local g = Core.gui()
 	if not g then
 		return
 	end
+	local function hooks()
+		return Core.farmHooks or {}
+	end
+	local W = 224
 	local root = ui.mk("Frame", g, {
-		Name = "FarmDock", Size = UDim2.fromOffset(196, 92), Position = UDim2.new(1, -216, 0, 70),
+		Name = "FarmDock", Size = UDim2.fromOffset(W, 150), Position = UDim2.new(1, -(W + 20), 0, 70),
 		BackgroundColor3 = C.BG, BorderSizePixel = 0, Active = true, Draggable = true,
 	})
 	ui.round(root, 8)
-	local hubBtn = ui.button(root, { Position = UDim2.fromOffset(6, 6), Size = UDim2.fromOffset(62, 28), TextSize = 12 })
-	local buffBtn = ui.button(root, { Position = UDim2.fromOffset(72, 6), Size = UDim2.new(1, -78, 0, 28), TextSize = 12 })
-	local stat = ui.label(root, {
-		Position = UDim2.fromOffset(8, 38), Size = UDim2.new(1, -16, 0, 18), TextSize = 11, TextColor3 = C.GRAY,
-		TextXAlignment = Enum.TextXAlignment.Left,
+	Core.rememberPos(root, "dock")
+	local hubBtn = ui.button(root, { Position = UDim2.fromOffset(6, 6), Size = UDim2.fromOffset(58, 28), TextSize = 12 })
+	local onBtn = ui.button(root, { Position = UDim2.fromOffset(68, 6), Size = UDim2.fromOffset(80, 28), TextSize = 12 })
+	local gearBtn = ui.button(root, { Position = UDim2.fromOffset(154, 6), Size = UDim2.fromOffset(28, 28), TextSize = 16, Text = "⚙" })
+	local xBtn = ui.button(root, {
+		Position = UDim2.fromOffset(W - 34, 6), Size = UDim2.fromOffset(28, 28), TextSize = 12, Text = "X", BackgroundColor3 = C.RED,
 	})
-	local dishBtn = ui.button(root, {
-		Position = UDim2.fromOffset(6, 60), Size = UDim2.new(0.5, -9, 0, 26), TextSize = 11, Font = ui.FONT,
-	})
-	local leadBtn = ui.button(root, {
-		Position = UDim2.new(0.5, 3, 0, 60), Size = UDim2.new(0.5, -9, 0, 26), TextSize = 11, Font = ui.FONT,
-	})
+	local function dockLabel(y)
+		return ui.label(root, {
+			Position = UDim2.fromOffset(8, y), Size = UDim2.new(1, -16, 0, 16), TextSize = 11, TextColor3 = C.GRAY,
+			TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+		})
+	end
+	local line1, line2, stat = dockLabel(38), dockLabel(54), dockLabel(70)
+	local bw = (W - 12 - 8) / 3
+	local buffBtn = ui.button(root, { Position = UDim2.fromOffset(6, 90), Size = UDim2.fromOffset(bw, 26), TextSize = 11, Font = ui.FONT })
+	local dishBtn = ui.button(root, { Position = UDim2.fromOffset(10 + bw, 90), Size = UDim2.fromOffset(bw, 26), TextSize = 11, Font = ui.FONT })
+	local leadBtn = ui.button(root, { Position = UDim2.fromOffset(14 + 2 * bw, 90), Size = UDim2.fromOffset(bw, 26), TextSize = 11, Font = ui.FONT })
+	local speedBtn = ui.button(root, { Position = UDim2.fromOffset(6, 120), Size = UDim2.fromOffset(104, 24), TextSize = 11, Font = ui.FONT })
+	local logBtn = ui.button(root, { Position = UDim2.fromOffset(114, 120), Size = UDim2.fromOffset(104, 24), TextSize = 11, Font = ui.FONT })
 	Core.bindText(hubBtn, "dock_hub")
+
+	-- log pane (under the dock)
+	local pane = ui.mk("Frame", root, {
+		Position = UDim2.new(0, 0, 1, 6), Size = UDim2.new(1, 0, 0, 190), BackgroundColor3 = C.BG, BorderSizePixel = 0, Visible = false,
+	})
+	ui.round(pane, 8)
+	local copyBtn = ui.button(pane, { Position = UDim2.fromOffset(6, 6), Size = UDim2.new(1, -12, 0, 22), TextSize = 11, Font = ui.FONT })
+	Core.bindText(copyBtn, "dock_copy")
+	local scroll = ui.mk("ScrollingFrame", pane, {
+		Position = UDim2.fromOffset(6, 32), Size = UDim2.new(1, -12, 1, -38), BackgroundTransparency = 1, BorderSizePixel = 0,
+		ScrollBarThickness = 3, AutomaticCanvasSize = Enum.AutomaticSize.Y, CanvasSize = UDim2.new(),
+	})
+	local logLbl = ui.label(scroll, {
+		Size = UDim2.new(1, -6, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, TextSize = 10, TextWrapped = true,
+		TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, TextColor3 = C.GRAY,
+	})
 
 	local function statusText()
 		if not cfg.on then
@@ -1057,11 +1465,57 @@ local function startBuff(scope, farm)
 		end
 		return Core.t("buff_none")
 	end
+
+	local function fmtTime(sec)
+		sec = math.floor(sec)
+		if sec >= 3600 then
+			return string.format("%d:%02d:%02d", math.floor(sec / 3600), math.floor(sec % 3600 / 60), sec % 60)
+		end
+		return string.format("%d:%02d", math.floor(sec / 60), sec % 60)
+	end
+	local function fmtNum(n)
+		n = math.floor(n + 0.5)
+		if n >= 1000000 then
+			return string.format("%.1fM", n / 1000000)
+		elseif n >= 10000 then
+			return string.format("%.0fk", n / 1000)
+		elseif n >= 1000 then
+			return string.format("%.1fk", n / 1000)
+		end
+		return tostring(n)
+	end
+
+	-- layout of the top row depends on which hooks the farm has registered
+	local function layoutTop()
+		local h = hooks()
+		gearBtn.Visible = h.settings ~= nil
+		onBtn.Visible = h.toggle ~= nil
+		local right = gearBtn.Visible and 150 or (W - 38)
+		onBtn.Size = UDim2.fromOffset(math.max(40, right - 68), 28)
+		speedBtn.Visible = h.speed ~= nil
+		logBtn.Size = speedBtn.Visible and UDim2.fromOffset(104, 24) or UDim2.fromOffset(W - 12, 24)
+		logBtn.Position = speedBtn.Visible and UDim2.fromOffset(114, 120) or UDim2.fromOffset(6, 120)
+	end
+
 	local function refresh()
+		layoutTop()
+		local h = hooks()
+		local on = false
+		if h.isOn then
+			local ok, r = pcall(h.isOn)
+			on = ok and r == true
+		end
+		onBtn.Text = Core.t(on and "v_on" or "v_off"):upper()
+		onBtn.BackgroundColor3 = on and C.GREEN or C.RED
 		buffBtn.Text = Core.t("buff_label") .. ": " .. Core.t(cfg.on and "v_on" or "v_off")
 		buffBtn.BackgroundColor3 = cfg.on and C.GREEN or C.BTN
-		dishBtn.Text = Core.t("buff_dish", optOf(cfg.dish).tool)
+		dishBtn.Text = optOf(cfg.dish).tool
 		leadBtn.Text = Core.t("buff_lead", cfg.lead)
+		if h.speed and h.speed.label then
+			local ok, r = pcall(h.speed.label)
+			speedBtn.Text = Core.t("dock_speed", ok and tostring(r) or "?")
+		end
+		logBtn.Text = Core.t(pane.Visible and "dock_log_hide" or "dock_log")
 		stat.Text = statusText()
 	end
 	refresh()
@@ -1071,6 +1525,37 @@ local function startBuff(scope, farm)
 			Core.toggleHub()
 		end
 	end)
+	onBtn.Activated:Connect(function()
+		local h = hooks()
+		if h.toggle then
+			pcall(h.toggle)
+		end
+		refresh()
+	end)
+	gearBtn.Activated:Connect(function()
+		local h = hooks()
+		if h.settings then
+			pcall(h.settings)
+		end
+	end)
+	speedBtn.Activated:Connect(function()
+		local h = hooks()
+		if h.speed and h.speed.next then
+			pcall(h.speed.next)
+		end
+		refresh()
+	end)
+	xBtn.Activated:Connect(function()
+		Core.confirm({
+			titleKey = "confirm_title", textKey = "confirm_text", yesKey = "confirm_yes", noKey = "confirm_no",
+			onYes = Core.unload,
+		})
+	end)
+	logBtn.Activated:Connect(function()
+		pane.Visible = not pane.Visible
+		refresh()
+	end)
+	copyBtn.Activated:Connect(Core.copyLog)
 	buffBtn.Activated:Connect(function()
 		cfg.on = not cfg.on
 		B.msg = nil
@@ -1094,11 +1579,71 @@ local function startBuff(scope, farm)
 		refresh()
 	end)
 	local offLang = Core.onLang(refresh)
+
+	-- once per second: run time, counter, per-hour rates, buff status, log pane
+	local runSec, wasOn, lastT = 0, false, os.clock()
+	local function tick()
+		local now = os.clock()
+		local dt = now - lastT
+		lastT = now
+		local h = hooks()
+		local on
+		if h.isOn then
+			local ok, r = pcall(h.isOn)
+			on = ok and r == true
+		else
+			on = farmActive(farm)
+		end
+		if on and not wasOn then
+			runSec = 0 -- a new run: the farm resets its own counters when it is switched on
+		end
+		wasOn = on
+		if on and not Core.paused() then
+			runSec = runSec + dt
+		end
+		local st
+		if h.stats then
+			local ok, r = pcall(h.stats)
+			if ok and type(r) == "table" then
+				st = r
+			end
+		end
+		if st and (on or runSec > 0) then
+			local count = tonumber(st.count) or 0
+			line1.Text = Core.t("st_line1", fmtTime(runSec), Core.t(st.unitKey or "u_items"), fmtNum(count))
+			if runSec >= 20 then
+				local txt = Core.t("st_rate", fmtNum(count / runSec * 3600))
+				if st.coins then
+					txt = txt .. " · " .. Core.t("st_coins", fmtNum(st.coins / runSec * 3600))
+				end
+				line2.Text = txt
+			else
+				line2.Text = ""
+			end
+		else
+			line1.Text = on and fmtTime(runSec) or Core.t("st_wait")
+			line2.Text = ""
+		end
+		onBtn.Text = Core.t(on and "v_on" or "v_off"):upper()
+		onBtn.BackgroundColor3 = on and C.GREEN or C.RED
+		stat.Text = statusText()
+		layoutTop()
+		if pane.Visible then
+			local from = math.max(1, #logBuf - 19)
+			local lines = {}
+			for i = from, #logBuf do
+				lines[#lines + 1] = logBuf[i]
+			end
+			local text = #lines > 0 and table.concat(lines, "\n") or Core.t("dock_log_empty")
+			if logLbl.Text ~= text then
+				logLbl.Text = text
+				scroll.CanvasPosition = Vector2.new(0, 1e6)
+			end
+		end
+	end
 	task.spawn(function()
 		while scope.alive() and root.Parent do
-			pcall(function()
-				stat.Text = statusText()
-			end)
+			pcall(tick)
 			task.wait(1)
 		end
 	end)
@@ -1112,14 +1657,15 @@ end
 -- ============================================================
 -- Farm launch: runs a farm script (source text) with a fresh scope; the dock window comes with it
 -- ============================================================
-function Core.launch(name, src)
+function Core.launch(name, src, version)
 	if Core.farmScope then
 		pcall(Core.farmScope.stop)
 	end
 	local scope = Core.newScope()
-	Core.farmScope, Core.farmName = scope, name
-	Core.farmActive, Core.buffSafe = nil, nil -- hooks of the previous farm
+	Core.farmScope, Core.farmName, Core.farmVersion = scope, name, version
+	Core.farmActive, Core.buffSafe, Core.farmHooks = nil, nil, nil -- hooks of the previous farm
 	scope.after = function()
+		Core.farmHooks = nil
 		Core.logUnload(name)
 	end
 	env.STATE = scope
@@ -1137,6 +1683,25 @@ function Core.launch(name, src)
 		if not ok then
 			Core.log("CORE", "runtime error in %s: %s", name, tostring(e))
 			Core.toast(name .. ": " .. tostring(e), "err", 6)
+		end
+	end)
+	-- after a death / respawn: the farm keeps working (farms with their own handler get the hook too)
+	Core.onRespawn(scope, function(ch)
+		local h = Core.farmHooks
+		local on = false
+		if h and h.isOn then
+			local ok, r = pcall(h.isOn)
+			on = ok and r == true
+		end
+		if not on then
+			return
+		end
+		pcall(function()
+			ch:WaitForChild("HumanoidRootPart", 10)
+		end)
+		Core.toast(Core.t("respawn_cont"), "info", 3)
+		if h.onRespawn then
+			pcall(h.onRespawn, ch)
 		end
 	end)
 	local okB, eB = pcall(startBuff, scope, name)
@@ -1159,10 +1724,29 @@ function Core.unload()
 	end
 	Core.save(true)
 	Core.logUnload("hub")
+	for _, c in ipairs(coreConns) do
+		pcall(function()
+			c:Disconnect()
+		end)
+	end
+	table.clear(coreConns)
 	pcall(function()
-		if sg then
-			sg:Destroy()
+		if fabGui then
+			fabGui:Destroy()
 		end
+	end)
+	for _, g in ipairs(guis) do
+		pcall(function()
+			g:Destroy()
+		end)
+	end
+	table.clear(guis)
+	-- clean getgenv: nothing of the project stays behind
+	for _, k in ipairs({ "STATE", "MFarmUnload", "AFARM", "_AFARM_THREADS", "_AFARM_CONNS" }) do
+		env[k] = nil
+	end
+	pcall(function()
+		_G.STATE = nil
 	end)
 	if env.HubCore == Core then
 		env.HubCore = nil
@@ -1170,4 +1754,5 @@ function Core.unload()
 end
 
 Core.logLoad("core " .. Core.VERSION)
+pcall(Core.updateFab)
 return Core
