@@ -1,11 +1,12 @@
 --[[ ============================================================
- AutoFarm Hub · core.luau · v3.0   (@version 3.0)
+ AutoFarm Hub · core.luau · v3.1   (@version 3.1)
  Part of the AutoFarm Hub project: hub.luau (the only file the user runs), core.luau (this file, shared module),
  garden.luau, fishing.luau, mining.luau (farms), versions.json (version list), lang.luau (optional extra languages).
  Needs an executor with: loadstring, game:HttpGet, writefile/readfile/isfile (for saved settings), gethui (optional).
  See README.md for the file layout and how to add a language.
 ============================================================ ]]
 -- AutoFarm Hub: shared module (Core) v3.0
+-- v3.1: the confirm dialog is a plain Frame (a button nested in a button swallowed the clicks of Yes / Cancel; no CanvasGroup).
 -- v3.0 (hub v4.0, cosmetics): themes (dark / light + accent colour), remembered panel positions, hotkey + floating button
 --   to show / hide the whole interface, anti-AFK, unified farm panel (dock: ON/OFF, speed, settings, stats, buff timer,
 --   last 20 log lines), generic respawn handling, new languages through Core.addStrings (the language list grows by itself),
@@ -63,7 +64,7 @@ if env.HubCore and env.HubCore.unload then
 	pcall(env.HubCore.unload)
 end
 
-local Core = { VERSION = "3.0", dead = false }
+local Core = { VERSION = "3.1", dead = false }
 env.HubCore = Core
 
 local UIS = game:GetService("UserInputService")
@@ -769,14 +770,14 @@ function Core.confirm(o)
 	if modal and modal.Parent then
 		pcall(modal.Destroy, modal)
 	end
-	local dim = mk("TextButton", g, {
+	local dim = mk("Frame", g, {
 		Name = "Confirm", Size = UDim2.fromOffset(300, 156), Position = UDim2.new(0.5, -150, 0.5, -78), BackgroundColor3 = Color3.new(0, 0, 0),
-		BackgroundTransparency = 1, BorderSizePixel = 0, Text = "", AutoButtonColor = false, ZIndex = 50,
+		BackgroundTransparency = 1, BorderSizePixel = 0, Active = true, ZIndex = 50,
 	})
 	modal = dim -- no full-screen dim layer anymore: only the dialog box itself takes clicks, everything else stays usable
-	local box = mk("CanvasGroup", dim, {
+	local box = mk("Frame", dim, {
 		Size = UDim2.fromScale(1, 1), BackgroundColor3 = C.BG,
-		BorderSizePixel = 0, GroupTransparency = 1,
+		BorderSizePixel = 0, ZIndex = 51,
 	})
 	ui.round(box, 10)
 	mk("UIStroke", box, { Color = C.ORANGE, Thickness = 1.5 })
@@ -807,14 +808,7 @@ function Core.confirm(o)
 			return
 		end
 		closed = true
-		pcall(function()
-			local ti = TweenInfo.new(0.12)
-			TweenService:Create(box, ti, { GroupTransparency = 1 }):Play()
-			TweenService:Create(dim, ti, { BackgroundTransparency = 1 }):Play()
-		end)
-		task.delay(0.15, function()
-			pcall(dim.Destroy, dim)
-		end)
+		pcall(dim.Destroy, dim)
 		if cb then
 			task.spawn(cb)
 		end
@@ -824,10 +818,6 @@ function Core.confirm(o)
 	end)
 	no.Activated:Connect(function()
 		close(o.onNo)
-	end)
-	pcall(function()
-		local ti = TweenInfo.new(0.15)
-		TweenService:Create(box, ti, { GroupTransparency = 0 }):Play()
 	end)
 end
 
