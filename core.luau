@@ -1,12 +1,14 @@
 --[[ ============================================================
- AutoFarm Hub · core.luau · v3.1   (@version 3.1)
+ AutoFarm Hub · core.luau · v3.2   (@version 3.2)
  Part of the AutoFarm Hub project: hub.luau (the only file the user runs), core.luau (this file, shared module),
  garden.luau, fishing.luau, mining.luau (farms), versions.json (version list), lang.luau (optional extra languages).
  Needs an executor with: loadstring, game:HttpGet, writefile/readfile/isfile (for saved settings), gethui (optional).
  See README.md for the file layout and how to add a language.
 ============================================================ ]]
 -- AutoFarm Hub: shared module (Core) v3.0
--- v3.1: the confirm dialog is a plain Frame (a button nested in a button swallowed the clicks of Yes / Cancel; no CanvasGroup).
+-- v3.2: the unload warning covers the whole panel (like the fishing one): [Cancel (3)] counts down, then everything unloads by itself.
+--   Core.confirm{ parent = panelFrame, countdown = 3, ... }; without parent: a small window in the middle of the screen (Yes / No).
+--   Every element has an explicit ZIndex (the children of the dialog were hidden behind it).
 -- v3.0 (hub v4.0, cosmetics): themes (dark / light + accent colour), remembered panel positions, hotkey + floating button
 --   to show / hide the whole interface, anti-AFK, unified farm panel (dock: ON/OFF, speed, settings, stats, buff timer,
 --   last 20 log lines), generic respawn handling, new languages through Core.addStrings (the language list grows by itself),
@@ -64,7 +66,7 @@ if env.HubCore and env.HubCore.unload then
 	pcall(env.HubCore.unload)
 end
 
-local Core = { VERSION = "3.1", dead = false }
+local Core = { VERSION = "3.2", dead = false }
 env.HubCore = Core
 
 local UIS = game:GetService("UserInputService")
@@ -331,6 +333,7 @@ end
 -- v3.0 strings (core): panel, themes, hotkey, stats, about
 Core.addStrings({
 	ru = {
+		unload_title = "ВЫГРУЗКА СКРИПТА", unload_text = "Всё будет остановлено и выгружено.",
 		u_items = "предметов", u_mined = "добыто", u_harvest = "собрано", u_caught = "поймано",
 		st_line1 = "%s · %s: %s", st_rate = "%s/ч", st_coins = "%s монет/ч", st_wait = "фарм выключен",
 		dock_speed = "скорость: %s", dock_log = "журнал", dock_log_hide = "журнал ▴", dock_copy = "копировать лог",
@@ -342,6 +345,7 @@ Core.addStrings({
 		ui_hidden = "Интерфейс скрыт, вернуть: %s",
 	},
 	en = {
+		unload_title = "UNLOAD SCRIPT", unload_text = "Everything will be stopped and unloaded.",
 		u_items = "items", u_mined = "mined", u_harvest = "harvested", u_caught = "caught",
 		st_line1 = "%s · %s: %s", st_rate = "%s/h", st_coins = "%s coins/h", st_wait = "farm is off",
 		dock_speed = "speed: %s", dock_log = "log", dock_log_hide = "log ▴", dock_copy = "copy log",
@@ -770,37 +774,48 @@ function Core.confirm(o)
 	if modal and modal.Parent then
 		pcall(modal.Destroy, modal)
 	end
-	local dim = mk("Frame", g, {
-		Name = "Confirm", Size = UDim2.fromOffset(300, 156), Position = UDim2.new(0.5, -150, 0.5, -78), BackgroundColor3 = Color3.new(0, 0, 0),
-		BackgroundTransparency = 1, BorderSizePixel = 0, Active = true, ZIndex = 50,
+	-- o.parent = a panel: the warning covers it completely (v3.2); without it a small window in the middle of the screen
+	local cover = o.parent and o.parent.Parent and o.parent or nil
+	local W, H = 300, 156
+	if cover then
+		W, H = cover.Size.X.Offset, cover.Size.Y.Offset
+	end
+	local box = mk("Frame", cover or g, {
+		Name = "Confirm", Size = cover and UDim2.fromScale(1, 1) or UDim2.fromOffset(W, H),
+		Position = cover and UDim2.new() or UDim2.new(0.5, -W / 2, 0.5, -H / 2),
+		BackgroundColor3 = C.BG, BorderSizePixel = 0, Active = true,
 	})
-	modal = dim -- no full-screen dim layer anymore: only the dialog box itself takes clicks, everything else stays usable
-	local box = mk("Frame", dim, {
-		Size = UDim2.fromScale(1, 1), BackgroundColor3 = C.BG,
-		BorderSizePixel = 0, ZIndex = 51,
-	})
-	ui.round(box, 10)
-	mk("UIStroke", box, { Color = C.ORANGE, Thickness = 1.5 })
+	modal = box
+	ui.round(box, cover and 8 or 10)
+	mk("UIStroke", box, { Color = o.countdown and C.RED or C.ORANGE, Thickness = 1.5 })
 	ui.label(box, {
-		Position = UDim2.fromOffset(12, 10), Size = UDim2.new(1, -24, 0, 20), TextSize = 15,
+		Position = UDim2.fromOffset(10, 6), Size = UDim2.new(1, -20, 0, 18), TextSize = 14,
 		Font = ui.FONT_BOLD, TextXAlignment = Enum.TextXAlignment.Left, Text = pickText(o, "title"),
 	})
 	ui.label(box, {
-		Position = UDim2.fromOffset(12, 36), Size = UDim2.new(1, -24, 0, 66), TextSize = 13, TextWrapped = true,
-		TextColor3 = C.GRAY, TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
-		Text = pickText(o, "text"),
+		Position = UDim2.fromOffset(10, 26), Size = UDim2.new(1, -20, 0, math.max(20, H - 26 - 42)), TextSize = 12,
+		TextWrapped = true, TextColor3 = C.GRAY, TextXAlignment = Enum.TextXAlignment.Left,
+		TextYAlignment = Enum.TextYAlignment.Top, Text = pickText(o, "text"),
 	})
-	local yes = ui.button(box, {
-		Position = UDim2.fromOffset(12, 110), Size = UDim2.new(0.5, -18, 0, 34), TextSize = 14,
-		BackgroundColor3 = o.single and C.GREEN or C.RED, Text = pickText(o, "yes"),
-	})
-	local no = ui.button(box, {
-		Position = UDim2.new(0.5, 6, 0, 110), Size = UDim2.new(0.5, -18, 0, 34), TextSize = 14,
-		Text = pickText(o, "no"),
-	})
-	if o.single then -- one wide button (messages): [yes] only
-		yes.Size = UDim2.new(1, -24, 0, 34)
-		no.Visible = false
+	local by = H - 38
+	local yes, no
+	if o.countdown then -- one wide [Cancel (3)] button: when the count reaches zero the action runs by itself
+		no = ui.button(box, { Position = UDim2.fromOffset(10, by), Size = UDim2.new(1, -20, 0, 30), TextSize = 14 })
+	else
+		yes = ui.button(box, {
+			Position = UDim2.fromOffset(10, by), Size = UDim2.new(0.5, -14, 0, 30), TextSize = 13,
+			BackgroundColor3 = C.RED, Text = pickText(o, "yes"),
+		})
+		no = ui.button(box, {
+			Position = UDim2.new(0.5, 4, 0, by), Size = UDim2.new(0.5, -14, 0, 30), TextSize = 13, Text = pickText(o, "no"),
+		})
+	end
+	-- explicit ZIndex everywhere: nothing of the panel underneath may draw over the warning or take its clicks
+	box.ZIndex = 100
+	for _, d in ipairs(box:GetDescendants()) do
+		if d:IsA("GuiObject") then
+			d.ZIndex = 101
+		end
 	end
 	local closed = false
 	local function close(cb)
@@ -808,19 +823,32 @@ function Core.confirm(o)
 			return
 		end
 		closed = true
-		pcall(dim.Destroy, dim)
+		pcall(box.Destroy, box)
 		if cb then
 			task.spawn(cb)
 		end
 	end
-	yes.Activated:Connect(function()
-		close(o.onYes)
-	end)
+	if yes then
+		yes.Activated:Connect(function()
+			close(o.onYes)
+		end)
+	end
 	no.Activated:Connect(function()
 		close(o.onNo)
 	end)
+	if o.countdown then
+		task.spawn(function()
+			for i = o.countdown, 1, -1 do
+				if closed then
+					return
+				end
+				no.Text = pickText(o, "no") .. " (" .. i .. ")"
+				task.wait(1)
+			end
+			close(o.onYes)
+		end)
+	end
 end
-
 
 -- ============================================================
 -- Info window (v3.0): title + scrolling rich text + [Close]. Used for "About".
@@ -929,7 +957,7 @@ function Core.panel(opts)
 	if opts.onClose then
 		closeBtn.Activated:Connect(function()
 			Core.confirm({
-				titleKey = "confirm_title", textKey = "confirm_text", yesKey = "confirm_yes", noKey = "confirm_no",
+				parent = root, countdown = 3, titleKey = "unload_title", textKey = "unload_text", noKey = "confirm_no",
 				onYes = opts.onClose,
 			})
 		end)
@@ -1537,7 +1565,7 @@ local function startBuff(scope, farm)
 	end)
 	xBtn.Activated:Connect(function()
 		Core.confirm({
-			titleKey = "confirm_title", textKey = "confirm_text", yesKey = "confirm_yes", noKey = "confirm_no",
+			parent = root, countdown = 3, titleKey = "unload_title", textKey = "unload_text", noKey = "confirm_no",
 			onYes = Core.unload,
 		})
 	end)
