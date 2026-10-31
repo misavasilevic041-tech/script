@@ -1,5 +1,5 @@
 --[[ ============================================================
- AutoFarm Hub · hub.luau · v4.1   (@version 4.1)
+ AutoFarm Hub · hub.luau · v4.2   (@version 4.2)
  The ONLY file the user runs. It downloads core.luau, preloads the farm files, shows the menu and starts a farm.
  Files of the project: hub.luau, core.luau (shared module), garden.luau, fishing.luau, mining.luau (farms),
  versions.json (version list for the update check), lang.luau (optional: extra languages). See README.md.
@@ -9,6 +9,7 @@
  BASE is the folder with the files. For local testing put the files into the executor's workspace folder and set
  BASE = "AutoFarmHub/files/" (anything not starting with "http" is read with readfile).
 ============================================================ ]]
+-- v4.2: warnings cover the whole menu (unload: countdown, then it unloads by itself; switch farm: Yes / No).
 -- v4.1: loading screen without CanvasGroup (buttons inside it did not react).
 -- v4.0 (cosmetics): loading screen, preloading of all files with a clear error when GitHub is unreachable (retry / continue),
 --   version check against versions.json, themes (dark / light + accent), hotkey + floating button, anti-AFK switch,
@@ -18,7 +19,7 @@
 --   Every started farm gets the dock window with a [Hub] button: it opens this menu again WITHOUT stopping the farm.
 --   Picking a farm while another one runs asks first. Running the hub again asks "reload?".
 
-local HUB_VERSION = "4.1"
+local HUB_VERSION = "4.2"
 local BASE = "https://raw.githubusercontent.com/misavasilevic041-tech/script/refs/heads/main/"
 
 local FILES = {
@@ -419,6 +420,7 @@ function main()
 				return
 			end
 			Core.confirm({
+				parent = panel and panel.root,
 				titleKey = "switch_title",
 				text = T("switch_text", T(titleOf[Core.farmName] or tostring(Core.farmName)), T(titleKey)),
 				yesKey = "switch_yes", noKey = "confirm_no",
@@ -652,8 +654,8 @@ function main()
 			return T("hub_unload"), C.RED
 		end, function()
 			Core.confirm({
-				titleKey = "confirm_title", textKey = "confirm_text", yesKey = "confirm_yes", noKey = "confirm_no",
-				onYes = Core.unload,
+				parent = panel and panel.root, countdown = 3, titleKey = "unload_title", textKey = "unload_text",
+				noKey = "confirm_no", onYes = Core.unload,
 			})
 		end)
 		Core.onLang(updAll)
