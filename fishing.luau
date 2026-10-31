@@ -11,6 +11,7 @@
 --   AF.hardCast  true/false                     cast at exactly 34.0 m (MAX DEPTH)
 --   AF.sell / sellKeep / sellEvery / sellMax    auto-sell
 --   AF.autoRod / autoBait / baitMaxPrice       v3: auto rod pick, bait pick + auto-buy (see runMaint)
+--   AF.logging  true/false                     log on/off (off by default; also a row in the settings menu)
 --   AF.stop()    unload: stop everything, destroy the menu, clear getgenv() entries
 --
 -- v1 (hub): runs under the hub. STATE comes from Core.launch, the log goes to Core.log (copy-log button),
@@ -60,6 +61,7 @@ Core.addStrings({
 		af_autorod = "автовыбор удочки",
 		af_autobait = "приманка",
 		af_baitcap = "макс. цена приманки",
+		af_log = "лог",
 	},
 	en = {
 		af_enabled = "ENABLED",
@@ -85,6 +87,7 @@ Core.addStrings({
 		af_autorod = "auto rod",
 		af_autobait = "bait",
 		af_baitcap = "max bait price",
+		af_log = "log",
 	},
 })
 
@@ -145,6 +148,7 @@ local DEFAULTS = {
 	autoRod = true,
 	autoBait = "auto", -- "off" | "auto" | a bait id (Dough, Worm, Shrimp, Shimmer, DeepSea, Ancient)
 	baitMaxPrice = 6, -- per piece; "auto" never picks or buys a more expensive bait
+	logging = false, -- log is off by default
 }
 for k, v in pairs(Core.getFarm("fishing", DEFAULTS)) do
 	if AF[k] == nil then
@@ -160,6 +164,9 @@ local function saveSettings()
 end
 
 local function log(fmt, ...)
+	if not AF.logging then
+		return
+	end
 	local s = string.format(fmt, ...)
 	local t = AF.trace
 	t[#t + 1] = string.format("[%6.2f] %s", os.clock() - AF.t0, s)
@@ -1157,6 +1164,11 @@ local function buildGui()
 	})
 	Core.bindText(copyBtn, "log_copy")
 	copyBtn.Activated:Connect(Core.copyLog)
+	addRow("af_log", function()
+		return AF.logging == true
+	end, function(v)
+		AF.logging = v
+	end, { false, true })
 	addGap()
 	for _, s in ipairs({
 		{ "af_policy", "policy", { "smart", "always", "probe" } },
