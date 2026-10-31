@@ -1,5 +1,5 @@
 --[[ ============================================================
- AutoFarm Hub · hub.luau · v4.0   (@version 4.0)
+ AutoFarm Hub · hub.luau · v4.1   (@version 4.1)
  The ONLY file the user runs. It downloads core.luau, preloads the farm files, shows the menu and starts a farm.
  Files of the project: hub.luau, core.luau (shared module), garden.luau, fishing.luau, mining.luau (farms),
  versions.json (version list for the update check), lang.luau (optional: extra languages). See README.md.
@@ -9,6 +9,7 @@
  BASE is the folder with the files. For local testing put the files into the executor's workspace folder and set
  BASE = "AutoFarmHub/files/" (anything not starting with "http" is read with readfile).
 ============================================================ ]]
+-- v4.1: loading screen without CanvasGroup (buttons inside it did not react).
 -- v4.0 (cosmetics): loading screen, preloading of all files with a clear error when GitHub is unreachable (retry / continue),
 --   version check against versions.json, themes (dark / light + accent), hotkey + floating button, anti-AFK switch,
 --   last used farm highlighted, "About" page, optional lang.luau with extra languages, scrolling settings list.
@@ -17,7 +18,7 @@
 --   Every started farm gets the dock window with a [Hub] button: it opens this menu again WITHOUT stopping the farm.
 --   Picking a farm while another one runs asks first. Running the hub again asks "reload?".
 
-local HUB_VERSION = "4.0"
+local HUB_VERSION = "4.1"
 local BASE = "https://raw.githubusercontent.com/misavasilevic041-tech/script/refs/heads/main/"
 
 local FILES = {
@@ -291,9 +292,9 @@ function main()
 	-- ===== Loading screen =====
 	local function showSplash()
 		local g = Core.gui()
-		local box = ui.mk("CanvasGroup", g, {
+		local box = ui.mk("Frame", g, {
 			Name = "HubSplash", Size = UDim2.fromOffset(290, 150), Position = UDim2.new(0.5, -145, 0.5, -75),
-			BackgroundColor3 = C.BG, BorderSizePixel = 0, GroupTransparency = 1, ZIndex = 70,
+			BackgroundColor3 = C.BG, BorderSizePixel = 0, Active = true, ZIndex = 70,
 		})
 		ui.round(box, 12)
 		ui.mk("UIStroke", box, { Color = C.GREEN, Thickness = 1.5 })
@@ -315,9 +316,6 @@ function main()
 			Position = UDim2.fromOffset(12, 86), Size = UDim2.new(1, -24, 0, 26), TextSize = 12, TextColor3 = C.GRAY,
 			TextWrapped = true, Text = T("splash_loading"),
 		})
-		pcall(function()
-			TweenService:Create(box, TweenInfo.new(0.2), { GroupTransparency = 0 }):Play()
-		end)
 		local sp = {}
 		function sp.progress(frac)
 			pcall(function()
@@ -351,12 +349,7 @@ function main()
 			return choice or "continue"
 		end
 		function sp.close()
-			pcall(function()
-				TweenService:Create(box, TweenInfo.new(0.2), { GroupTransparency = 1 }):Play()
-			end)
-			task.delay(0.25, function()
-				pcall(box.Destroy, box)
-			end)
+			pcall(box.Destroy, box)
 		end
 		return sp
 	end
